@@ -156,9 +156,12 @@ function _sync_ext_detail_side_pane!(m::KaimonModel, extensions)
     manifest = ext.config.manifest
     entry = ext.config.entry
 
-    # Rebuild detection: hash key fields that change
+    # Rebuild detection: hash every field this pane renders. A field left out of this tuple is
+    # shown stale. For a stopped extension nothing here moves on its own, so the pane can sit
+    # unchanged indefinitely.
     h = hash((
         m.ext_selected, ext.status, ext.restart_count, ext.session_key,
+        entry.enabled, entry.auto_start,
         ext.process !== nothing && process_running(ext.process),
         length(ext.error_log),
         ext.status == :running ? round(Int, time() - ext.started_at) : 0,

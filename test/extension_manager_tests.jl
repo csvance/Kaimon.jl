@@ -280,6 +280,40 @@ end
     end
 end
 
+@testset "detail pane re-renders when enabled/auto_start change" begin
+    # The Extensions-tab detail pane caches its rendered lines behind a hash of the fields it
+    # displays, so it only rebuilds when one of them moves. `enabled`/`auto_start` were absent
+    # from that hash: toggling either updated the config and the pane went on showing the old
+    # value until something else (a selection change, a status change) forced a rebuild.
+    withenv("XDG_CONFIG_HOME" => mktempdir()) do
+        dir = mktempdir()
+        manifest = Kaimon.ExtensionManifest("toggle_x", "M", "t", "", "", String[], "", String[])
+        ext = Kaimon.ManagedExtension(
+            Kaimon.ExtensionConfig(Kaimon.ExtensionEntry(dir, true, false), manifest))
+        m = Kaimon.KaimonModel()
+        m.ext_selected = 1
+
+        rendered() = join(
+            (join(sp.content for sp in line) for line in m.ext_detail_side_pane.content), "\n")
+
+        Kaimon._sync_ext_detail_side_pane!(m, [ext])
+        @test occursin(r"Enabled\s+yes", rendered())
+        @test occursin(r"Auto-start\s+no", rendered())
+
+        # auto_start has no start/stop side effect, so nothing is ever spawned here.
+        Kaimon.set_extension_config!(ext; auto_start = true)
+        Kaimon._sync_ext_detail_side_pane!(m, [ext])
+        @test occursin(r"Auto-start\s+yes", rendered())
+
+        # Disabling a :stopped extension likewise only rewrites the flag.
+        Kaimon.set_extension_config!(ext; enabled = false)
+        Kaimon._sync_ext_detail_side_pane!(m, [ext])
+        @test occursin(r"Enabled\s+no", rendered())
+
+        rm(dir; recursive = true, force = true)
+    end
+end
+
 @testset "extension gate advertise probe (timeout diagnostic)" begin
     dir = mktempdir()
     @test !Kaimon._extension_gate_advertised(dir)              # empty → nothing advertised
