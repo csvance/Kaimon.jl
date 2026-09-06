@@ -671,12 +671,17 @@ function (@main)(ARGS)
     # Fire-and-forget: resolve the user's global environment in the background.
     # When Kaimon gains new deps, the global env manifest (where Kaimon is dev'd)
     # becomes stale — this ensures `using Kaimon` in startup.jl works next time.
+    # Only for a dev checkout, which is the case this serves. A registry install ships no
+    # manifest, and `Pkg.resolve` opens Project.toml for writing, which a registry install's
+    # read-only files refuse: the child just fails on every start, unseen behind devnull.
     kaimon_dir = dirname(@__DIR__)
-    julia = joinpath(Sys.BINDIR, "julia")
-    cmd = `$julia --startup-file=no --project=$kaimon_dir -e "using Pkg; Pkg.resolve(io=devnull); Pkg.instantiate(io=devnull)"`
-    # stdin=devnull, not just stdout/stderr: a child that inherits the terminal can read
-    # it (Pkg still prompts on some paths) and take the whole process group down with it.
-    run(pipeline(cmd; stdin=devnull, stdout=devnull, stderr=devnull); wait=false)
+    if _project_has_manifest(kaimon_dir)
+        julia = joinpath(Sys.BINDIR, "julia")
+        cmd = `$julia --startup-file=no --project=$kaimon_dir -e "using Pkg; Pkg.resolve(io=devnull); Pkg.instantiate(io=devnull)"`
+        # stdin=devnull, not just stdout/stderr: a child that inherits the terminal can read
+        # it (Pkg still prompts on some paths) and take the whole process group down with it.
+        run(pipeline(cmd; stdin=devnull, stdout=devnull, stderr=devnull); wait=false)
+    end
 
     cli_port = nothing
     theme = nothing
