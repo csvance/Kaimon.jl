@@ -648,6 +648,25 @@ function _install_profile_hook!()
     return nothing
 end
 
+"""
+    _ensure_headless_config!()
+
+Write a default global config when `--headless` starts with none. Uses the wizard's own
+defaults: `:strict`, one generated API key, loopback allowlist, dynamic port. Returns without
+touching an existing config.
+"""
+function _ensure_headless_config!()
+    load_global_config() === nothing || return nothing
+    config = KaimonConfig(:strict, [generate_api_key()], ["127.0.0.1", "::1"])
+    if save_global_config(config)
+        println("Wrote a default configuration to $(get_global_config_path()) ",
+                "(mode: strict, one API key). Run `kaimon` in a terminal to change it.")
+    else
+        @warn "Could not write a default configuration; startup will need a terminal for the setup wizard" path = get_global_config_path()
+    end
+    return nothing
+end
+
 function (@main)(ARGS)
     # Fire-and-forget: resolve the user's global environment in the background.
     # When Kaimon gains new deps, the global env manifest (where Kaimon is dev'd)
@@ -747,6 +766,11 @@ function (@main)(ARGS)
     try _install_profile_hook!() catch end
 
     if headless
+        # First start with no config: `start!` would launch the setup wizard, and the wizard
+        # needs a terminal. Headless is how a service unit, a container, or a nohup'd shell
+        # starts Kaimon, so there is nobody to answer it and no TTY to draw it on (the wizard
+        # dies constructing one). Write the same defaults the wizard offers instead.
+        _ensure_headless_config!()
         _ignore_terminal_stop_signals!()
         # A backgrounded server is stopped with a signal rather than a keypress, and
         # Julia runs atexit hooks on SIGTERM — so this is what gives `kill` the same
