@@ -181,7 +181,7 @@ function _spawn_managed_qdrant(; storage_path::String, http_port::Int, log_path:
     # user's repo — and litters it.
     workdir = dirname(log_path)
     return run(pipeline(setenv(qdrant_cmd, env; dir = workdir);
-                        stdout = logio, stderr = logio); wait = false)
+                        stdin = devnull, stdout = logio, stderr = logio); wait = false)
 end
 
 """True if the managed child we started (this session) is still alive."""

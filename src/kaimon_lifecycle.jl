@@ -187,6 +187,11 @@ function stop!()
     end
 end
 
+"""How to stop this server, given whether we have a terminal we can read keys from."""
+function _headless_shutdown_hint()
+    _stdin_is_foreground_tty() ? "press Ctrl-Q (or Ctrl-C)" : "send SIGTERM (kill $(getpid()))"
+end
+
 """
     _headless_wait_and_shutdown(port)
 
@@ -196,7 +201,7 @@ only `wait(Condition())`s, so a Ctrl-C kills it without running teardown —
 leaving gate/extension subprocesses and socket files behind.
 """
 function _headless_wait_and_shutdown(port)
-    printstyled("\n⏻ Headless server on port $port — press Ctrl-Q (or Ctrl-C) to shut down.\n";
+    printstyled("\n⏻ Headless server on port $port — $(_headless_shutdown_hint()) to shut down.\n";
                 color = :light_black)
     flush(stdout)
     _wait_for_quit_key()
@@ -210,33 +215,96 @@ function _headless_wait_and_shutdown(port)
     exit(0)
 end
 
+"""Park the current task forever, until a signal or `exit` takes the process down."""
+_wait_forever() = (try; wait(Condition()); catch; end; nothing)
+
+# SIGTTIN/SIGTTOU are 21/22 on both Linux and the BSDs (macOS included).
+const _SIGTTIN = Cint(21)
+const _SIGTTOU = Cint(22)
+
+"""
+    _stdin_is_foreground_tty() -> Bool
+
+True when it is safe to read stdin and change its terminal mode.
+
+A process in a BACKGROUND process group that reads its controlling terminal is sent
+SIGTTIN, and one that changes the terminal's mode is sent SIGTTOU. Both default to
+stopping the whole process group, which for a server started as `kaimon --headless &`
+means the listening socket stays bound while nothing is left running to accept on it:
+connections succeed and every request hangs. Redirecting only stdout/stderr is not
+enough, because stdin is still the terminal.
+
+Windows has no process groups or terminal ownership, so a console-attached process may
+always read its console.
+"""
+function _stdin_is_foreground_tty()
+    stdin isa Base.TTY || return false
+    Sys.iswindows() && return true
+    return try
+        fg = ccall(:tcgetpgrp, Cint, (Cint,), 0)
+        fg >= 0 && fg == ccall(:getpgrp, Cint, ())
+    catch
+        false
+    end
+end
+
+"""
+    _ignore_terminal_stop_signals!()
+
+Ignore SIGTTIN/SIGTTOU for this process, so a terminal access from a background
+process group fails with an error instead of stopping us. `_stdin_is_foreground_tty`
+already keeps us off the terminal when we start out backgrounded; this covers being
+backgrounded LATER (Ctrl-Z then `bg`) with a read already in flight, where a stop
+would wedge the server with no way back short of SIGKILL. No-op on Windows.
+"""
+function _ignore_terminal_stop_signals!()
+    Sys.iswindows() && return nothing
+    sig_ign = Ptr{Cvoid}(1)   # SIG_IGN
+    for sig in (_SIGTTIN, _SIGTTOU)
+        try
+            ccall(:signal, Ptr{Cvoid}, (Cint, Ptr{Cvoid}), sig, sig_ign)
+        catch
+        end
+    end
+    return nothing
+end
+
 """
     _wait_for_quit_key()
 
 Block until the operator presses Ctrl-Q (0x11) or Ctrl-C (0x03). The terminal is
 put in raw mode so both arrive as bytes (ISIG off) — that's what lets Ctrl-C run
-our clean shutdown instead of killing the process. With no interactive TTY
-(backgrounded/piped) there are no keys to read, so just wait for a signal.
+our clean shutdown instead of killing the process. When stdin is not a terminal we
+may safely read from (piped, or backgrounded from a shell), there are no keys to
+take, so just wait for a signal instead.
 """
 function _wait_for_quit_key()
-    if !(stdin isa Base.TTY)
-        try; wait(Condition()); catch; end
+    if !_stdin_is_foreground_tty()
+        _wait_forever()
         return
     end
     term = REPL.Terminals.TTYTerminal(get(ENV, "TERM", "dumb"), stdin, stdout, stderr)
     REPL.Terminals.raw!(term, true)
+    lost_terminal = false
     try
         while true
             b = try
                 read(stdin, UInt8)
             catch e
-                e isa EOFError ? break : rethrow()
+                # EOF (Ctrl-D) is the operator asking to quit, as before. Any other
+                # failure means the terminal went away under us — backgrounded mid-read,
+                # with SIGTTIN ignored so it errors rather than stopping the group. Keep
+                # serving; we just no longer have a quit key.
+                e isa EOFError || (lost_terminal = true)
+                break
             end
             (b == 0x11 || b == 0x03) && break   # Ctrl-Q or Ctrl-C
         end
     finally
         try; REPL.Terminals.raw!(term, false); catch; end
     end
+    lost_terminal && _wait_forever()
+    return
 end
 
 # ============================================================================
@@ -587,7 +655,9 @@ function (@main)(ARGS)
     kaimon_dir = dirname(@__DIR__)
     julia = joinpath(Sys.BINDIR, "julia")
     cmd = `$julia --startup-file=no --project=$kaimon_dir -e "using Pkg; Pkg.resolve(io=devnull); Pkg.instantiate(io=devnull)"`
-    run(pipeline(cmd; stdout=devnull, stderr=devnull); wait=false)
+    # stdin=devnull, not just stdout/stderr: a child that inherits the terminal can read
+    # it (Pkg still prompts on some paths) and take the whole process group down with it.
+    run(pipeline(cmd; stdin=devnull, stdout=devnull, stderr=devnull); wait=false)
 
     cli_port = nothing
     theme = nothing
@@ -677,6 +747,12 @@ function (@main)(ARGS)
     try _install_profile_hook!() catch end
 
     if headless
+        _ignore_terminal_stop_signals!()
+        # A backgrounded server is stopped with a signal rather than a keypress, and
+        # Julia runs atexit hooks on SIGTERM — so this is what gives `kill` the same
+        # clean teardown Ctrl-Q gets, instead of stranding gate/extension children and
+        # socket files. Guarded so the Ctrl-Q path doesn't tear down twice.
+        atexit(() -> SERVER[] === nothing || (try; stop!(); catch; end))
         start!(; port = port)
         # Non-interactive: block on a quit key (Ctrl-Q / Ctrl-C) and shut down
         # cleanly via stop!() instead of being killed mid-flight. With `-i` we

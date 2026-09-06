@@ -369,7 +369,7 @@ function _build_extension_env!(env::AbstractString, project_path::AbstractString
     build_env["JULIA_PKG_PRECOMPILE_AUTO"] = "0"
     open(build_log, "w") do io
         run(pipeline(setenv(`$julia_bin --startup-file=no --project=$env -e $code`, build_env);
-                     stdout = io, stderr = io))
+                     stdin = devnull, stdout = io, stderr = io))
     end
     return
 end
@@ -460,7 +460,9 @@ function spawn_extension!(ext::ManagedExtension)
         println(log_io, "\n--- Extension $(ext.config.manifest.namespace) starting at $(Dates.now()) ---")
         flush(log_io)
 
-        proc = run(pipeline(cmd; stdout = log_io, stderr = log_io); wait = false)
+        # stdin=devnull keeps the extension off the launching terminal: an inherited tty
+        # lets a background child stop the whole process group, taking the server with it.
+        proc = run(pipeline(cmd; stdin = devnull, stdout = log_io, stderr = log_io); wait = false)
         ext.process = proc
         ext.status = :starting
         # Re-stamp: the startup budget belongs to the BOOT, not to building the managed environment
