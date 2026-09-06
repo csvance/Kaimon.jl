@@ -211,11 +211,12 @@ function _render_extension_log_value(k::Symbol, v)
 end
 
 """
-    _build_extension_script(config::ExtensionConfig) -> String
+    _build_extension_script(config::ExtensionConfig; resolve::Bool=true) -> String
 
-Generate the Julia `-e` script that boots the extension subprocess.
+Generate the Julia `-e` script that boots the extension subprocess. `resolve=false` drops the
+boot-time `Pkg.resolve` (see `spawn_extension!`).
 """
-function _build_extension_script(config::ExtensionConfig)
+function _build_extension_script(config::ExtensionConfig; resolve::Bool = true)
     m = config.manifest
     e = config.entry
     # The subprocess is launched with --project=<extension path>, so the
@@ -261,11 +262,18 @@ function _build_extension_script(config::ExtensionConfig)
         ""
     end
 
+    # Picks up a dev checkout's edited deps before boot. Only ever emitted for a project we
+    # own (see `spawn_extension!`) — against a read-only depot install it fails, and if the
+    # install happens to be writable it is worse: it writes a Manifest.toml into the package
+    # dir, which makes `_project_has_manifest` treat it as a dev checkout from then on.
+    resolve_line = resolve ?
+        """try; import Pkg; Pkg.resolve(io=devnull); catch e; @warn "Pkg.resolve failed" exception=e; end""" : ""
+
     return """
     try
         using Revise
     catch; end
-    try; import Pkg; Pkg.resolve(io=devnull); catch e; @warn "Pkg.resolve failed" exception=e; end
+    $resolve_line
     using Kaimon
     # Auto-flushing logger so extension output is visible immediately in the log file
     # (formatter lives in Kaimon so it's testable and keeps structured kwargs).
@@ -399,7 +407,6 @@ function spawn_extension!(ext::ManagedExtension)
     ext.started_at = time()
     empty!(ext.error_log)
 
-    script = _build_extension_script(ext.config)
     log_io = nothing
 
     try
@@ -413,6 +420,10 @@ function spawn_extension!(ext::ManagedExtension)
         # extension can resolve its OWN deps (see `_ensure_extension_runtime_project`).
         project = _ensure_extension_runtime_project(
             ext.config.entry.project_path, ext.config.manifest.namespace)
+        # Resolve at boot only in a dev checkout, whose deps the user edits. A managed env was
+        # just built by `_ensure_extension_runtime_project`, and resolving it would reach back
+        # into the read-only depot dir the package is `develop`ed from.
+        script = _build_extension_script(ext.config; resolve = project == ext.config.entry.project_path)
         env = copy(ENV)
         # LOAD_PATH: extension project (@), Kaimon's environment (for Gate, LoggingExtras, etc.),
         # global env (@v#.#), stdlib.  Adding Kaimon's environment ensures extensions can
