@@ -255,21 +255,35 @@ function start!(;
     old_logger = global_logger()
     global_logger(ConsoleLogger(stderr, Logging.Warn))
 
+    # Redrawing one line in place needs a terminal. Redirected to a file or a pipe
+    # (`kaimon --headless >>log &`) the frames pile up as carriage returns and escape
+    # codes, so there we print each distinct status once, on its own plain line.
+    animate = stdout isa Base.TTY
+
     # Start animated spinner for startup
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     spinner_idx = Ref(1)
     spinner_active = Ref(true)
     status_msg = Ref("Starting Kaimon...")
 
+    clear_line!() = animate && (print("\r\033[K"); flush(stdout))
+
     # Background task to animate spinner
     spinner_task = @async begin
+        last_msg = ""
         while spinner_active[]
             msg = status_msg[]
-            # Magenta spinner, bold gray text
-            print("\r\033[K\033[35m$(spinner[spinner_idx[]])\033[0m \033[1;90m$msg\033[0m")
-            flush(stdout)
-            spinner_idx[] = spinner_idx[] % length(spinner) + 1
-            sleep(0.08)
+            if animate
+                # Magenta spinner, bold gray text
+                print("\r\033[K\033[35m$(spinner[spinner_idx[]])\033[0m \033[1;90m$msg\033[0m")
+                flush(stdout)
+                spinner_idx[] = spinner_idx[] % length(spinner) + 1
+            elseif msg != last_msg
+                println(msg)
+                flush(stdout)
+                last_msg = msg
+            end
+            sleep(animate ? 0.08 : 0.25)
         end
     end
 
@@ -283,7 +297,7 @@ function start!(;
         wait(spinner_task)
         global_logger(old_logger)
 
-        print("\r\033[K")  # Clear spinner line
+        clear_line!()
         security_config = setup_wizard_tui()
         if security_config === nothing
             error("Security configuration required. Run Kaimon.setup() first.")
@@ -325,7 +339,7 @@ function start!(;
             wait(spinner_task)
             global_logger(old_logger)
 
-            print("\r\033[K")  # Clear spinner line
+            clear_line!()
             error("Invalid security_mode. Must be :strict, :relaxed, or :lax")
         end
         security_config = SecurityConfig(
@@ -411,9 +425,13 @@ function start!(;
     # Green checkmark, dark blue text, the user's personality emoji, muted cyan port
     gate_info = gate ? ", gate" : ""
     pers = try; load_personality(); catch; "🐉"; end
-    print(
-        "\r\033[K\033[1;32m✓\033[0m \033[38;5;24mKaimon server started\033[0m \033[33m$pers\033[0m \033[90m(port $actual_port$gate_info)\033[0m\n",
-    )
+    if animate
+        print(
+            "\r\033[K\033[1;32m✓\033[0m \033[38;5;24mKaimon server started\033[0m \033[33m$pers\033[0m \033[90m(port $actual_port$gate_info)\033[0m\n",
+        )
+    else
+        println("✓ Kaimon server started $pers (port $actual_port$gate_info)")
+    end
     flush(stdout)
 
     if isdefined(Base, :active_repl) && Base.active_repl !== nothing
