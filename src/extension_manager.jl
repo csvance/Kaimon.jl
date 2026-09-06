@@ -320,13 +320,17 @@ function _project_has_manifest(project_path::AbstractString)
     return mf !== nothing && isfile(mf)
 end
 
-# Identity of the extension source, so an updated package (new depot slug or
+# Identity of the environment's inputs, so an updated package (new depot slug or
 # changed deps) rebuilds rather than reusing a stale env. Path + Project.toml
-# mtime captures both a new slug (path changes) and an in-place edit.
+# mtime captures both a new slug (path changes) and an in-place edit. Kaimon's own
+# source is part of the identity because the env resolves Kaimon too: a Kaimon
+# upgrade must re-resolve the shared dependencies, not reuse the old versions.
 function _extension_env_fingerprint(project_path::AbstractString)
-    pf = joinpath(project_path, "Project.toml")
-    stamp = isfile(pf) ? string(mtime(pf)) : "0"
-    return string(abspath(project_path), "|", stamp)
+    stamp(dir) = let pf = joinpath(dir, "Project.toml")
+        string(abspath(dir), "@", isfile(pf) ? mtime(pf) : 0)
+    end
+    kaimon = pkgdir(@__MODULE__)
+    return string(stamp(project_path), "|", kaimon === nothing ? "" : stamp(kaimon))
 end
 
 """
@@ -361,9 +365,20 @@ end
 function _build_extension_env!(env::AbstractString, project_path::AbstractString, namespace::AbstractString)
     mkpath(env)
     julia_bin = joinpath(Sys.BINDIR, "julia")
+    # Kaimon is developed in beside the extension so one resolve covers both. The subprocess
+    # stacks this env ahead of Kaimon's own on LOAD_PATH, and `locate_package` takes the first
+    # environment that has a package: with two separately resolved manifests, a dependency they
+    # share resolves to one version here and a different one there, and loading Kaimon picks up
+    # the mismatched pair (a package built against 2.x meeting 3.0 of its dependency, failing to
+    # precompile). Resolving them together is what makes the versions agree.
+    kaimon_src = pkgdir(@__MODULE__)
+    develop = kaimon_src === nothing ?
+        "Pkg.develop(path=raw\"$(abspath(project_path))\")" :
+        "Pkg.develop([Pkg.PackageSpec(path=raw\"$(abspath(project_path))\"), " *
+        "Pkg.PackageSpec(path=raw\"$(abspath(kaimon_src))\")])"
     code = """
     using Pkg
-    Pkg.develop(path=raw"$(abspath(project_path))")
+    $develop
     Pkg.instantiate()
     """
     _push_log!(:info, "Building managed environment for extension '$namespace' at $env")
