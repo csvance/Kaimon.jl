@@ -82,6 +82,54 @@ end
     end
 end
 
+# The replay values above are only useful if they still exist when _exec_restart reads them.
+# Both restart paths tear down FIRST and rebuild the command line afterwards — `restart()` at
+# gate_serve.jl:784 then :789, and the `:restart` handler at gate_protocol.jl:557 then :562 —
+# while _exec_restart reads its configuration from module state (gate_protocol.jl:274-282).
+# Everything `_cleanup()` resets is therefore dropped from the restart command line, so an
+# explicit remote TCP gate comes back as a plain IPC gate on a different endpoint, and its
+# namespace and options are lost. Only the session id survives, because `restart()` copies it
+# into a local before tearing down (gate_serve.jl:764).
+@testset "restart replay survives teardown" begin
+    KG = KaimonGate
+    prev = (KG._SESSION_ID[], KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
+            KG._TCP_PORT[], KG._TCP_STREAM_PORT[], KG._SESSION_NAMESPACE[],
+            KG._ALLOW_MIRROR[], KG._ALLOW_RESTART[])
+    withenv("XDG_CACHE_HOME" => mktempdir()) do
+        try
+            # An explicit remote TCP gate: not coerced, named, both options turned off.
+            KG._SESSION_ID[]        = "replay_probe"
+            KG._MODE[]              = :tcp
+            KG._LOCAL_TCP_COERCED[] = false
+            KG._TCP_HOST[]          = "0.0.0.0"
+            KG._TCP_PORT[]          = 9876
+            KG._TCP_STREAM_PORT[]   = 9877
+            KG._SESSION_NAMESPACE[] = "probe_ns"
+            KG._ALLOW_MIRROR[]      = false
+            KG._ALLOW_RESTART[]     = false
+
+            KG._cleanup()   # what both restart paths do before building the command line
+
+            # The exact expression _exec_restart evaluates at gate_protocol.jl:281-282.
+            kw = KG._restart_tcp_kwargs(KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
+                KG._TCP_PORT[], KG._TCP_STREAM_PORT[],
+                KG._CURVE_ENABLED[], KG._CURVE_ALLOW_ANY[])
+            @test occursin("mode=:tcp", kw)
+            @test occursin("port=9876", kw)
+            @test occursin("stream_port=9877", kw)
+
+            # …and the three it reads at gate_protocol.jl:274-276.
+            @test KG._SESSION_NAMESPACE[] == "probe_ns"
+            @test KG._ALLOW_MIRROR[] == false
+            @test KG._ALLOW_RESTART[] == false
+        finally
+            KG._SESSION_ID[], KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
+                KG._TCP_PORT[], KG._TCP_STREAM_PORT[], KG._SESSION_NAMESPACE[],
+                KG._ALLOW_MIRROR[], KG._ALLOW_RESTART[] = prev
+        end
+    end
+end
+
 @testset "utf16 wide-string conversion (Windows argv capture)" begin
     KG = KaimonGate
     # _capture_original_argv on Windows reads argv as NUL-terminated UTF-16 wide strings

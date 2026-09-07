@@ -251,6 +251,40 @@ end
     end
 end
 
+# `_serve` starts the ZAP handler at gate_serve.jl:379 but does not set `_RUNNING[] = true`
+# until :464, and it yields in between (the discovery metadata write at :446). The handler
+# loops on `while _RUNNING[]` (gate_curve.jl:435) and its `finally` closes the socket and nils
+# `_ZAP_SOCKET` (:453-456), so a handler scheduled inside that window exits at once and the
+# CURVE sockets then bind with no authenticator behind them. Every other task `_serve` spawns
+# is started AFTER the flag; this one is not. The testsets above have to set `_RUNNING[] = true`
+# by hand before starting the handler, which is this same bug as scaffolding.
+@testset "ZAP handler outlives a start before the running flag" begin
+    mktempdir() do dir
+        withenv("XDG_CACHE_HOME" => dir) do
+            prev_running = KG._RUNNING[]
+            prev_sock, prev_task = KG._ZAP_SOCKET[], KG._ZAP_TASK[]
+            ctx = ZMQ.Context()
+            try
+                KG._RUNNING[] = false          # the window _serve leaves open
+                task = KG._start_zap_handler!(ctx; allow_any = true)
+                for _ in 1:100                 # give the spawned task time to be scheduled
+                    istaskdone(task) && break
+                    sleep(0.01)
+                end
+                @test !istaskdone(task)
+                @test KG._ZAP_SOCKET[] !== nothing
+            finally
+                KG._RUNNING[] = false
+                sleep(0.4)
+                try; ZMQ.close(ctx); catch; end
+                KG._ZAP_SOCKET[] = prev_sock
+                KG._ZAP_TASK[]   = prev_task
+                KG._RUNNING[]    = prev_running
+            end
+        end
+    end
+end
+
 @testset "ZAP live re-read (authorize/revoke without restart)" begin
     spub, ssec = KG.curve_keypair()
     cpub, csec = KG.curve_keypair()
