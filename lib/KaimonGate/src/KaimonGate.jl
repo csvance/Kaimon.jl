@@ -159,6 +159,7 @@ set_restart_code_builder!(f)  = (_RESTART_CODE_BUILDER[] = f)
 include("gate_state.jl")
 include("gate_debug.jl")
 include("gate_tools.jl")
+include("gate_session.jl")   # after gate_tools.jl: GateSession has a Vector{GateTool} field
 include("gate_eval.jl")
 include("gate_stream.jl")
 include("gate_protocol.jl")
