@@ -239,7 +239,7 @@ function _serve(;
             # Restart with a specific session_id (e.g. _exec_restart) —
             # stop the gate started by startup.jl and continue below
             # to rebind with the requested session_id.
-            old_task = _GATE_TASK[]
+            old_task = _gate_task()
             _cleanup()
             # Wait for old message loop task to finish so its `finally`
             # block doesn't race with the new gate we're about to create.
@@ -266,7 +266,7 @@ function _serve(;
             # Same name replaces, so re-registering is still how a registrant updates its own
             # tools; everything else survives. Order is stable: incumbents keep their
             # positions and genuinely new tools append.
-            merged = copy(_SESSION_TOOLS[])
+            merged = copy(_session_tools())
             added = 0
             for t in tools
                 idx = findfirst(x -> x.name == t.name, merged)
@@ -277,7 +277,7 @@ function _serve(;
                     merged[idx] = t
                 end
             end
-            _SESSION_TOOLS[] = merged
+            _session_tools!(merged)
             # Only an EXPLICIT namespace re-labels a running gate. An auto-derived one says
             # nothing the gate does not already know, and adopting it would rename every
             # incumbent tool at the MCP layer on behalf of a caller that never asked.
@@ -302,8 +302,6 @@ function _serve(;
 
     # namespace / allow_mirror / allow_restart are already locals here and go straight into
     # the session below; only the fields whose call sites have not migrated keep a Ref.
-    _SESSION_TOOLS[] = tools
-    _ON_SHUTDOWN[] = on_shutdown
 
     # Ensure socket directory exists
     sock_dir()  # ensure it exists (mkpath is inside)
@@ -335,8 +333,6 @@ function _serve(;
         n === nothing || n < 1 || (try; ctx.io_threads = n; catch; end)
     end
     socket = _zmq_socket(ctx, ROUTER)
-    _GATE_CONTEXT[] = ctx
-    _GATE_SOCKET[] = socket
 
     # Set auth token for TCP mode.
     # Priority: KAIMON_GATE_TOKEN env var > host-provided token > none.
@@ -431,7 +427,6 @@ function _serve(;
         stream_endpoint = "ipc://$(joinpath(sock_dir(),"$(sid)-stream.sock"))"
         bind(pub_socket, stream_endpoint)
     end
-    _STREAM_SOCKET[] = pub_socket
 
     # Write metadata file for session discovery. Written for every LOCAL gate: real IPC
     # gates, and Windows gates that were coerced IPC → TCP (`local_gate`) — the server
@@ -471,19 +466,19 @@ function _serve(;
         local_tcp_coerced = local_tcp_coerced, allow_mirror = allow_mirror,
         allow_restart = allow_restart, mirror_repl = mirror_repl,
         start_time = start_time,
-        context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
-        stream_socket = _STREAM_SOCKET[], stream_endpoint = stream_endpoint,
+        context = ctx, socket = socket,
+        stream_socket = pub_socket, stream_endpoint = stream_endpoint,
         curve_enabled = curve_on, curve_allow_any = allow_any,
         curve_server_secret = curve_server_secret,
         curve_server_public = curve_server_public,
         zap_socket = _ZAP_SOCKET[], zap_task = _ZAP_TASK[],
-        on_shutdown = _ON_SHUTDOWN[], tools = _SESSION_TOOLS[],
+        on_shutdown = on_shutdown, tools = tools,
         running = true,
     )
     _running!(true)
     # Broadcaster owns the XPUB stream socket (send + subscription recv). Runs on
     # :interactive so it stays scheduled alongside the message loop.
-    _STREAM_TASK[] = Threads.@spawn :interactive begin
+    _stream_task!(Threads.@spawn :interactive begin
         try
             _stream_broadcaster(pub_socket)
         catch e
@@ -493,9 +488,9 @@ function _serve(;
                 @debug "Stream broadcaster exited" exception = e
             end
         end
-    end
+    end)
     local this_task
-    this_task = _GATE_TASK[] = Threads.@spawn :interactive begin
+    this_task = Threads.@spawn :interactive begin
         try
             _supervise_message_loop(socket)
         catch e
@@ -506,7 +501,7 @@ function _serve(;
             if _shutting_down()
                 # Remote shutdown: run optional cleanup hook, then exit
                 _shutting_down!(false)
-                hook = _ON_SHUTDOWN[]
+                hook = _on_shutdown()
                 if hook !== nothing
                     try
                         ch = Channel{Nothing}(1)
@@ -539,6 +534,7 @@ function _serve(;
             # double-cleanup of ZMQ resources and intermittent segfaults.
         end
     end
+    _gate_task!(this_task)
 
     _start_revise_watcher()
 
@@ -718,7 +714,7 @@ function _ensure_router!(sock::ZMQ.Socket)
     alive = isopen(sock) && (try; sock.events; true; catch; false; end)
     alive && return sock
     try; close(sock); catch; end
-    ctx = _GATE_CONTEXT[]
+    ctx = _gate_context()
     ctx === nothing && error("gate ZMQ context is gone; cannot rebind the ROUTER")
     new = _zmq_socket(ctx, ROUTER)
     _configure_router_socket!(new; curve = _curve_enabled(), allow_any = _curve_allow_any(),
@@ -731,7 +727,7 @@ function _ensure_router!(sock::ZMQ.Socket)
         "ipc://$(sock_path)"
     end
     bind(new, endpoint)
-    _GATE_SOCKET[] = new
+    _gate_socket!(new)
     @warn "Kaimon gate ROUTER socket was dead; rebound" endpoint
     return new
 end
@@ -749,7 +745,7 @@ function stop()
     _running!(false)
 
     # Wait for task to finish
-    task = _GATE_TASK[]
+    task = _gate_task()
     if task !== nothing && !istaskdone(task)
         try
             wait(task)
@@ -796,7 +792,7 @@ function restart()
 
     # Wait for the message-loop task to exit before tearing down sockets,
     # same as stop() does.
-    task = _GATE_TASK[]
+    task = _gate_task()
     if task !== nothing && !istaskdone(task)
         try
             wait(task)
@@ -819,7 +815,7 @@ function _cleanup()
     # gate leaves the process's streams as it found them.
     _restore_capture!()
     # Stop Revise watcher
-    watcher = _REVISE_WATCHER_TASK[]
+    watcher = _revise_watcher_task()
     if watcher !== nothing && !istaskdone(watcher)
         try
             # Wake the blocked wait so the task can exit
@@ -829,12 +825,12 @@ function _cleanup()
         catch
         end
     end
-    _REVISE_WATCHER_TASK[] = nothing
+    _revise_watcher_task!(nothing)
 
     # Stop the stream broadcaster and wait for it to release the XPUB BEFORE any
     # socket close below — a concurrent close+recv corrupts the heap (#51 class).
     # It exits once _running() is false (set by every caller before _cleanup).
-    stask = _STREAM_TASK[]
+    stask = _stream_task()
     if stask !== nothing && !istaskdone(stask)
         # The broadcaster now BLOCKS on the outbox (event-driven, no spin), so a
         # bare _running()=false won't wake it — nudge with the wake sentinel so its
@@ -843,7 +839,7 @@ function _cleanup()
         try; put!(_STREAM_OUTBOX, _STREAM_WAKE); catch; end
         try; wait(stask); catch; end
     end
-    _STREAM_TASK[] = nothing
+    _stream_task!(nothing)
 
     # IPC mode: don't explicitly close ZMQ sockets/context — GC finalizers handle
     # it. Explicit close during atexit was causing intermittent segfaults in LLVM's
@@ -852,13 +848,10 @@ function _cleanup()
     # this, restarting a TCP gate on the same port fails until GC runs. This is safe
     # because TCP stop is user-initiated (not atexit).
     if _mode() == :tcp
-        for sock in (_GATE_SOCKET, _STREAM_SOCKET, _SERVICE_SOCKET, _ZAP_SOCKET)
-            s = sock[]
-            if s !== nothing
-                try; close(s); catch; end
-            end
+        for s in (_gate_socket(), _stream_socket(), _ZAP_SOCKET[])
+            s === nothing || (try; close(s); catch; end)
         end
-        ctx = _GATE_CONTEXT[]
+        ctx = _gate_context()
         if ctx !== nothing
             try; close(ctx); catch; end
         end
@@ -883,20 +876,13 @@ function _cleanup()
 
     _ZAP_SOCKET[] = nothing
     _ZAP_TASK[] = nothing
-    _GATE_SOCKET[] = nothing
-    _STREAM_SOCKET[] = nothing
-    _SERVICE_SOCKET[] = nothing
-    _GATE_CONTEXT[] = nothing
 
     # Remove files
     cleanup_files(_session_id())
 
-    _GATE_TASK[] = nothing
     _running!(false)
     _restarting!(false)
     _shutting_down!(false)
-    _SESSION_TOOLS[] = GateTool[]
-    _ON_SHUTDOWN[] = nothing
 
     # Dropping the session IS the teardown: every field goes with it, including the outbox,
     # the in-flight count and the subscriber table, which the resets above had to clear by
@@ -914,7 +900,7 @@ function status()
     if _running()
         uptime = time() - _start_time()
         mins = round(Int, uptime / 60)
-        sock = _GATE_SOCKET[]
+        sock = _gate_socket()
         rep_ep = sock !== nothing ? rstrip(ZMQ._get_last_endpoint(sock), '\0') : "unknown"
         println("Gate: running")
         println("  Session:   $(_session_id())")
@@ -924,7 +910,7 @@ function status()
         println("  ROUTER:    $rep_ep")
         println("  PUB:       $(_stream_endpoint())")
         println("  Mirror:    $(_mirror_repl())")
-        println("  Tools:     $(length(_SESSION_TOOLS[]))")
+        println("  Tools:     $(length(_session_tools()))")
         println("  Pings:     $(_ping_count())$(  _last_ping_time() > 0 ? " (last $(round(Int, time() - _last_ping_time()))s ago)" : "")")
         println("  Messages:  $(_msg_count())")
         if _mode() == :tcp

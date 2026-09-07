@@ -108,23 +108,25 @@ end
     if KG._running() || Sys.iswindows()
         @test_skip true
     else
-        saved = (KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._SESSION[])
+        saved = KG._SESSION[]
         ctx = ZMQ.Context()
         sid = "test-rebind-$(bytes2hex(rand(UInt8, 4)))"
         path = joinpath(KG.sock_dir(), "$sid.sock")
         try
-            KG._GATE_CONTEXT[] = ctx
-            # _ensure_router! rebuilds the endpoint from the session's mode and id.
-            KG._SESSION[] = KG.GateSession(; running = true, mode = :ipc, id = sid)
+            # The context and socket are session fields, so they go in at construction:
+            # _ensure_router! rebuilds the endpoint from the session's mode and id, and
+            # takes the context from it too.
+            KG._SESSION[] = KG.GateSession(; running = true, mode = :ipc, id = sid,
+                                           context = ctx)
             s = KG._zmq_socket(ctx, ZMQ.ROUTER)
             KG._configure_router_socket!(s; curve = false, allow_any = false,
                                          server_secret = "")
             ZMQ.bind(s, "ipc://$path")
-            KG._GATE_SOCKET[] = s
+            KG._gate_socket!(s)
 
             # Live socket: returned untouched.
             @test KG._ensure_router!(s) === s
-            @test KG._GATE_SOCKET[] === s
+            @test KG._gate_socket() === s
 
             # Dead socket (the ENOTSOCK case): rebound on the same endpoint with
             # the same options.
@@ -132,7 +134,7 @@ end
             s2 = @test_logs (:warn, r"rebound") KG._ensure_router!(s)
             @test s2 !== s
             @test isopen(s2)
-            @test KG._GATE_SOCKET[] === s2
+            @test KG._gate_socket() === s2
             @test ispath(path)
             @test s2.rcvtimeo == KG._GATE_RCVTIMEO_IDLE[]
             @test s2.linger == 0
@@ -148,7 +150,7 @@ end
             close(d)
             close(s2)
         finally
-            KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._SESSION[] = saved
+            KG._SESSION[] = saved     # context and socket ride on the session
             try; close(ctx); catch; end
             rm(path; force = true)
         end

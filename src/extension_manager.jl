@@ -234,7 +234,7 @@ function _build_extension_script(config::ExtensionConfig; resolve::Bool = true)
     # Event subscription: connect SUB to Kaimon's global event PUB
     using Serialization
     let sock_dir = Kaimon.KaimonGate.sock_dir()
-        sub = Kaimon.ZMQ.Socket(Kaimon.KaimonGate._GATE_CONTEXT[], Kaimon.ZMQ.SUB)
+        sub = Kaimon.ZMQ.Socket(Kaimon.KaimonGate.gate_context(), Kaimon.ZMQ.SUB)
         sub.rcvtimeo = 1000  # 1s timeout so loop can check for shutdown
         if Sys.iswindows()
             Kaimon.ZMQ.connect(sub, "tcp://127.0.0.1:\$(Kaimon._EVENT_PUB_TCP_PORT[])")

@@ -7,8 +7,6 @@
 # MCP tool. This is the reverse of the existing gate protocol: instead of
 # Kaimon calling into the gate, the gate calls back into Kaimon.
 
-# Legacy ref: per-call sockets are used now (below), but cleanup still nils this.
-const _SERVICE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 
 # Windows has no ipc:// transport, so the service endpoint (a per-Kaimon-instance
 # singleton) uses a fixed TCP loopback port there — the direct analog of the single
@@ -37,7 +35,7 @@ wedge: the strict REQ send/recv FSM starts fresh every call. Supersedes the old
 single shared REQ + lock (+ reset-on-throw) design.
 """
 function _service_request(request)
-    ctx = _GATE_CONTEXT[]
+    ctx = _gate_context()
     ctx === nothing && error("Kaimon service endpoint not available (no ZMQ context).")
 
     # Unix: ipc:// socket file (presence-checkable). Windows: fixed TCP loopback port

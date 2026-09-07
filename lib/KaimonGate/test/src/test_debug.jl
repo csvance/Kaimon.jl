@@ -6,12 +6,12 @@ using KaimonGate
 # resumes it. The hook blocks on `take!(resume_ch)`; an InterruptException thrown
 # into the blocked task should resume execution and clear the paused state.
 #
-# Pure — no live gate: _publish_stream is a no-op when _STREAM_SOCKET[] is nothing,
+# Pure — no live gate: _publish_stream is a no-op when _stream_socket() is nothing,
 # so the hook runs standalone.
 
 @testset "breakpoint local release (#34)" begin
     KG = KaimonGate
-    @test KG._STREAM_SOCKET[] === nothing      # precondition: not serving → publish no-ops
+    @test KG._stream_socket() === nothing      # precondition: not serving → publish no-ops
     @test KG._DEBUG_PAUSED[] === nothing        # clean start
 
     # Run the hook on its own task; it pauses on take!(resume_ch).

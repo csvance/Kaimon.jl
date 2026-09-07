@@ -80,9 +80,9 @@ end
     sub = ZMQ.Socket(ctx, ZMQ.SUB)
     
     if Sys.iswindows()
-        sock = KaimonGate._GATE_SOCKET[]
+        sock = KaimonGate._gate_socket()
         rep_path = rstrip(ZMQ._get_last_endpoint(sock), '\0')
-        pub_sock = KaimonGate._STREAM_SOCKET[]
+        pub_sock = KaimonGate._stream_socket()
         pub_path = rstrip(ZMQ._get_last_endpoint(pub_sock), '\0')
     else
         sock_dir = KaimonGate.sock_dir()
@@ -164,7 +164,7 @@ end
     @test KaimonGate._running()
     @test KaimonGate._mode() == :tcp
     @test KaimonGate._auth_token() == token
-    sock = KaimonGate._GATE_SOCKET[]
+    sock = KaimonGate._gate_socket()
     @test sock !== nothing
     rep_endpoint = rstrip(ZMQ._get_last_endpoint(sock), '\0')
     @test startswith(rep_endpoint, "tcp://")

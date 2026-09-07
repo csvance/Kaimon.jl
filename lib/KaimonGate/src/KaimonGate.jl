@@ -192,7 +192,7 @@ function connect!()
 end
 
 # ── Public API (mirrors the former `Kaimon.Gate.*` surface) ──────────────────
-public serve, stop, restart, status, connect!
+public serve, stop, restart, status, connect!, gate_context
 public GateTool, call_tool, list_tools, image_result, MCP_CONTENT_SENTINEL
 public is_cancelled, stash, progress, push_panel, current_caller, current_agent_id
 public tty_path, tty_size, uninstall_infiltrator_hook!, infiltrator_routing

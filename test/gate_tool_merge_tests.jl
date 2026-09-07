@@ -16,26 +16,25 @@ const KG = Kaimon.KaimonGate
 # it has no way to read what is already registered, so the merge has to live here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Run `f` against a gate that BELIEVES it is running, with `tools` already registered,
-and restore every touched global afterwards. No socket is bound: `_serve`'s merge branch
-returns before any transport work, so the flag is all the branch needs."""
+"""Run `f` against a gate that BELIEVES it is running, with `tools` already registered.
+No socket is bound: `_serve`'s merge branch returns before any transport work, so a session
+that says it is running is all the branch needs.
+
+Everything the fixture sets is a session field, so the constructor is the whole setup and
+putting the old session back is the whole restore. Calling a setter afterwards would throw
+when there was no session to begin with."""
 function with_running_gate(f, tools; namespace = "incumbent_ns")
-    # namespace and id are session fields now, so the constructor sets them and putting the
-    # old session back restores them. Setting them afterwards would throw when there was no
-    # session to begin with.
-    saved = (session = KG._SESSION[], tools = KG._SESSION_TOOLS[])
+    saved = KG._SESSION[]
     KG._SESSION[] = KG.GateSession(;
         running = true, tools = tools, namespace = namespace, id = "test-session")
-    KG._SESSION_TOOLS[] = tools
     try
         f()
     finally
-        KG._SESSION[] = saved.session
-        KG._SESSION_TOOLS[] = saved.tools
+        KG._SESSION[] = saved
     end
 end
 
-toolnames() = [t.name for t in KG._SESSION_TOOLS[]]
+toolnames() = [t.name for t in KG._session_tools()]
 
 @testset "tool-call observers" begin
 
@@ -102,8 +101,8 @@ end
             new_handler = () -> "new"
             KG.serve(force = true, tools = [KG.GateTool("host_a", new_handler)])
             @test toolnames() == ["host_a", "host_b"]            # no duplicate, order held
-            idx = findfirst(t -> t.name == "host_a", KG._SESSION_TOOLS[])
-            @test KG._SESSION_TOOLS[][idx].handler === new_handler
+            idx = findfirst(t -> t.name == "host_a", KG._session_tools())
+            @test KG._session_tools()[idx].handler === new_handler
         end
     end
 

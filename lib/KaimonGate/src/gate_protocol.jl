@@ -438,7 +438,7 @@ function handle_message(request::NamedTuple)
             kaimon_version = _kv,
             project_path = dirname(Base.active_project()),
             label = get(ENV, "KAIMON_SESSION_LABEL", ""),   # client-provided display label (e.g. a notebook filename)
-            tools = [_reflect_tool(t) for t in _SESSION_TOOLS[]],
+            tools = [_reflect_tool(t) for t in _session_tools()],
             namespace = _session_namespace(),
             allow_restart = _allow_restart(),
             allow_mirror = _allow_mirror(),
@@ -455,11 +455,11 @@ function handle_message(request::NamedTuple)
         else
             Dict{String,Any}(string(k) => v for (k, v) in pairs(raw_args))
         end
-        idx = findfirst(t -> t.name == tool_name, _SESSION_TOOLS[])
+        idx = findfirst(t -> t.name == tool_name, _session_tools())
         if idx === nothing
             return (type = :error, message = "Unknown session tool: $tool_name")
         end
-        tool = _SESSION_TOOLS[][idx]
+        tool = _session_tools()[idx]
         # Caller identity = the invoking agent's Mcp-Session-Id (empty for a
         # self/nested call). MUST use the SCOPED task_local_storage(key, val) do…
         # form: this sync path may run on the long-lived message-loop task, so a
@@ -490,11 +490,11 @@ function handle_message(request::NamedTuple)
         end
         request_id = string(get(request, :request_id, ""))
 
-        idx = findfirst(t -> t.name == tool_name, _SESSION_TOOLS[])
+        idx = findfirst(t -> t.name == tool_name, _session_tools())
         if idx === nothing
             return (type = :error, message = "Unknown session tool: $tool_name")
         end
-        tool = _SESSION_TOOLS[][idx]
+        tool = _session_tools()[idx]
         # Caller identity = the invoking agent's Mcp-Session-Id (read before the
         # spawn so the captured `request` value is used). This path spawns a fresh
         # task per call, so the bare 2-arg setter below is already naturally scoped.
@@ -536,7 +536,7 @@ function handle_message(request::NamedTuple)
 
         return (type = :accepted, request_id = request_id)
     elseif msg_type == :list_tools
-        tool_meta = [_reflect_tool(t) for t in _SESSION_TOOLS[]]
+        tool_meta = [_reflect_tool(t) for t in _session_tools()]
         return (type = :tools, tools = tool_meta)
     elseif msg_type == :shutdown
         _shutting_down!(true)

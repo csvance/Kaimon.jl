@@ -57,7 +57,6 @@ mutable struct GateSession
     socket::Union{ZMQ.Socket,Nothing}          # request ROUTER
     stream_socket::Union{ZMQ.Socket,Nothing}   # XPUB
     stream_endpoint::String
-    service_socket::Union{ZMQ.Socket,Nothing}  # vestigial: per-call sockets replaced it
 
     # ── tasks ────────────────────────────────────────────────────────────────
     task::Union{Task,Nothing}                  # supervisor owning the message loop
@@ -113,7 +112,6 @@ function GateSession(;
     socket = nothing,
     stream_socket = nothing,
     stream_endpoint::AbstractString = "",
-    service_socket = nothing,
     task = nothing,
     stream_task = nothing,
     revise_watcher_task = nothing,
@@ -136,7 +134,7 @@ function GateSession(;
         String(id), String(namespace), mode, String(tcp_host), Int(tcp_port),
         Int(tcp_stream_port), String(auth_token), local_tcp_coerced, allow_mirror,
         allow_restart, mirror_repl, Float64(start_time),
-        context, socket, stream_socket, String(stream_endpoint), service_socket,
+        context, socket, stream_socket, String(stream_endpoint),
         task, stream_task, revise_watcher_task,
         curve_enabled, curve_allow_any, String(curve_server_secret),
         String(curve_server_public), zap_socket, zap_task,
@@ -170,6 +168,17 @@ end
 
 """The session if a gate is running, else `nothing`. For reads that must tolerate no gate."""
 @inline _session_or_nothing() = _SESSION[]
+
+"""
+    gate_context() -> Union{ZMQ.Context,Nothing}
+
+The running gate's ZMQ context, or `nothing` when no gate is running.
+
+Public because the host creates its own sockets on the gate's context rather than a second
+one — Kaimon's extension stream subscriber does exactly this. Everything else about the
+session stays internal.
+"""
+gate_context() = _gate_context()
 
 # ── Field accessors ───────────────────────────────────────────────────────────
 #
@@ -217,8 +226,6 @@ _stream_socket()       = (s = _SESSION[]; s === nothing ? nothing : s.stream_soc
 _stream_socket!(v)     = (_session().stream_socket = v)
 _stream_endpoint()     = (s = _SESSION[]; s === nothing ? ""      : s.stream_endpoint)
 _stream_endpoint!(v)   = (_session().stream_endpoint = String(v))
-_service_socket()      = (s = _SESSION[]; s === nothing ? nothing : s.service_socket)
-_service_socket!(v)    = (_session().service_socket = v)
 
 # tasks
 _gate_task()             = (s = _SESSION[]; s === nothing ? nothing : s.task)

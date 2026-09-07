@@ -17,8 +17,9 @@ function with_gate_state(f;
 )
     KG = KaimonGate
     orig_session = KG._SESSION[]
-    orig_tools   = KG._SESSION_TOOLS[]
     try
+        # Every field this fixture supplies is a session field, so the constructor is the
+        # whole setup and putting the old session back is the whole restore.
         KG._SESSION[] = KG.GateSession(;
             mode            = something(mode, :ipc),
             auth_token      = something(token, ""),
@@ -26,13 +27,9 @@ function with_gate_state(f;
             running         = something(running, false),
             stream_endpoint = something(stream_endpoint, ""),
         )
-        # _SESSION_TOOLS is the last Ref still read here; the rest are session fields the
-        # constructor above sets and dropping the session puts back.
-        tools !== nothing && (KG._SESSION_TOOLS[] = tools)
         f()
     finally
-        KG._SESSION[]       = orig_session
-        KG._SESSION_TOOLS[] = orig_tools
+        KG._SESSION[] = orig_session
     end
 end
 

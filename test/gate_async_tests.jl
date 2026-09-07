@@ -7,20 +7,18 @@ using Serialization
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Run `f` with `tools` registered on a synthetic session, restoring both on exit.
+"""Run `f` with `tools` registered on a synthetic session, restoring it on exit.
 
-The session is needed because handling any request bumps the per-session message counter, so
-`handle_message` no longer works against module state alone."""
+A session is needed because handling any request bumps the per-session message counter, so
+`handle_message` no longer works against module state alone. Tools live on the session too,
+so the constructor is the whole setup."""
 function with_tools(f, tools)
     KG = Kaimon.KaimonGate
-    original = KG._SESSION_TOOLS[]
     saved_session = KG._SESSION[]
     KG._SESSION[] = KG.GateSession(; running = true, tools = tools)
-    KG._SESSION_TOOLS[] = tools
     try
         f()
     finally
-        KG._SESSION_TOOLS[] = original
         KG._SESSION[] = saved_session
     end
 end
@@ -78,7 +76,7 @@ end
 @testset "Gate.progress" begin
 
     @testset "is a no-op without a socket (does not throw)" begin
-        # _STREAM_SOCKET[] is nothing → _publish_stream returns early
+        # _stream_socket() is nothing → _publish_stream returns early
         @test_nowarn Kaimon.KaimonGate.progress("no socket")
     end
 
@@ -94,7 +92,7 @@ end
     @testset "does not throw when called from inside a handler context" begin
         result = @async begin
             task_local_storage(:gate_request_id, "synthetic-req-id")
-            # _STREAM_SOCKET[] is still nothing → _publish_stream is a no-op
+            # _stream_socket() is still nothing → _publish_stream is a no-op
             Kaimon.KaimonGate.progress("synthetic progress")
             :ok
         end
@@ -126,9 +124,9 @@ end
     was_running = Kaimon.KaimonGate._running()
 
     if was_running
-        orig_tools = copy(Kaimon.KaimonGate._SESSION_TOOLS[])
+        orig_tools = copy(Kaimon.KaimonGate._session_tools())
         session_id = Kaimon.KaimonGate._session_id()
-        Kaimon.KaimonGate._SESSION_TOOLS[] = vcat(orig_tools, [tool])
+        Kaimon.KaimonGate._session_tools!(vcat(orig_tools, [tool]))
         # No sleep needed — sockets are already bound
     else
         session_id = "test-async-$(bytes2hex(rand(UInt8, 4)))"
@@ -205,7 +203,7 @@ end
         close(ctx)
         if was_running
             # Restore original tools without disturbing the running gate
-            Kaimon.KaimonGate._SESSION_TOOLS[] = orig_tools
+            Kaimon.KaimonGate._session_tools!(orig_tools)
         else
             Kaimon.KaimonGate.stop()
         end
@@ -305,7 +303,7 @@ end
     @test Kaimon.KaimonGate._running()
     @test Kaimon.KaimonGate._mode() == :tcp
 
-    sock = Kaimon.KaimonGate._GATE_SOCKET[]
+    sock = Kaimon.KaimonGate._gate_socket()
     @test sock !== nothing
     rep_endpoint = rstrip(ZMQ._get_last_endpoint(sock), '\0')
     @test startswith(rep_endpoint, "tcp://")

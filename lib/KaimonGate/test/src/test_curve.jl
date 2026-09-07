@@ -341,7 +341,7 @@ end
                 spub = KG._curve_server_public()
                 @test length(spub) == 40
 
-                rep_endpoint = rstrip(ZMQ._get_last_endpoint(KG._GATE_SOCKET[]), '\0')
+                rep_endpoint = rstrip(ZMQ._get_last_endpoint(KG._gate_socket()), '\0')
                 pub_endpoint = KG._stream_endpoint()
                 ctx = ZMQ.Context()
 
@@ -384,7 +384,7 @@ end
             KG._serve(name = "fc", session_id = sid1, force = true, mode = :tcp,
                       host = "127.0.0.1", port = 0, curve = true, allow_any = false)
             sleep(0.25)
-            ep1 = rstrip(ZMQ._get_last_endpoint(KG._GATE_SOCKET[]), '\0')
+            ep1 = rstrip(ZMQ._get_last_endpoint(KG._gate_socket()), '\0')
             spub = KG._curve_server_public()
             ctx = ZMQ.Context()
             req = ZMQ.Socket(ctx, ZMQ.REQ); req.rcvtimeo = 1200; req.linger = 0
@@ -401,7 +401,7 @@ end
                       host = "127.0.0.1", port = 0, curve = true, allow_any = false,
                       allowed_clients = [cpub])
             sleep(0.25)
-            ep2 = rstrip(ZMQ._get_last_endpoint(KG._GATE_SOCKET[]), '\0')
+            ep2 = rstrip(ZMQ._get_last_endpoint(KG._gate_socket()), '\0')
             spub2 = KG._curve_server_public()
             req2 = ZMQ.Socket(ctx, ZMQ.REQ); req2.rcvtimeo = 3000; req2.linger = 0
             KG.make_curve_client!(req2, spub2, cpub, csec)

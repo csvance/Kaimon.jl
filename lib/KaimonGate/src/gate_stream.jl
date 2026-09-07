@@ -183,7 +183,7 @@ stream_topics() = lock(_STREAM_SUBS_LOCK) do; sort!(collect(keys(_STREAM_SUBS)))
 # ── Publishing (enqueue-only; the broadcaster owns the socket) ───────────────
 
 function _publish_stream(channel::String, data; request_id::String = "")
-    _STREAM_SOCKET[] === nothing && return
+    _stream_socket() === nothing && return
     io = IOBuffer()
     msg =
         isempty(request_id) ? (channel = channel, data = data) :
@@ -219,7 +219,7 @@ already-framed binary blobs (e.g. Slate's `slate_emit_bin`); the string `_publis
 everything else.
 """
 function _publish_stream_raw(channel::AbstractString, payload::Vector{UInt8})
-    _STREAM_SOCKET[] === nothing && return
+    _stream_socket() === nothing && return
     cb = codeunits(String(channel))
     length(cb) <= 255 || throw(ArgumentError("_publish_stream_raw: channel name too long ($(length(cb)) > 255)"))
     header = Vector{UInt8}(undef, 2 + length(cb))
@@ -253,7 +253,7 @@ framing lets that client recognize and skip observe broadcasts (it checks
 [`stream_subscribed`](@ref) / [`on_stream_subscribe`](@ref).
 """
 function publish(topic::AbstractString, payload)
-    _STREAM_SOCKET[] === nothing && return nothing
+    _stream_socket() === nothing && return nothing
     io = IOBuffer()
     serialize(io, payload)
     frames = Vector{UInt8}[Vector{UInt8}(codeunits(String(topic))), take!(io)]
@@ -268,7 +268,7 @@ end
 function _start_revise_watcher()
     isdefined(Main, :Revise) || return
     isdefined(Main.Revise, :revision_event) || return
-    _REVISE_WATCHER_TASK[] = @async begin
+    _revise_watcher_task!(@async begin
         try
             while _running()
                 wait(Main.Revise.revision_event)
@@ -281,7 +281,7 @@ function _start_revise_watcher()
             e isa InterruptException && return
             @debug "Revise watcher exited" exception = e
         end
-    end
+    end)
 end
 
 # Proactive auto-import: a freshly connected session's `Main` is empty, so the very

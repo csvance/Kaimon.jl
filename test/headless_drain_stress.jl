@@ -101,7 +101,7 @@ function spawn_subprocess_gates(n::Int, cache_dir::String)
     import Pkg; Pkg.instantiate(io = devnull)
     using KaimonGate
     KaimonGate.serve(force = true, spawned_by = "stress")
-    t = KaimonGate._GATE_TASK[]
+    t = KaimonGate._gate_task()
     t === nothing ? (while true; sleep(3600); end) : wait(t)
     """
     env = copy(ENV)

@@ -44,4 +44,4 @@ demo_compile_tool = GateTool(
 )
 
 # Register tools with the running gate
-append!(Kaimon.KaimonGate._SESSION_TOOLS[], [demo_progress_tool, demo_compile_tool])
+append!(Kaimon.KaimonGate._session_tools(), [demo_progress_tool, demo_compile_tool])

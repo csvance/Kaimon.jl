@@ -46,7 +46,6 @@ function GateTool(name::AbstractString, handler::Function;
                     timeout_ms === nothing ? nothing : Int(timeout_ms))
 end
 
-const _SESSION_TOOLS = Ref{Vector{GateTool}}(GateTool[])
 
 # ── Tool-call observers ───────────────────────────────────────────────────────
 # A hook for code that wants to KNOW a tool was called without changing what the call does — a

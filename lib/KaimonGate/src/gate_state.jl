@@ -186,11 +186,6 @@ _claim_mirror!()   = Threads.atomic_cas!(_MIRROR_BUSY, false, true) == false
 _release_mirror!() = Threads.atomic_xchg!(_MIRROR_BUSY, false)
 
 # Global state for the running gate
-const _GATE_TASK = Ref{Union{Task,Nothing}}(nothing)
-const _GATE_CONTEXT = Ref{Union{ZMQ.Context,Nothing}}(nothing)
-const _GATE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
-const _STREAM_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)  # PUB for streaming output
-const _REVISE_WATCHER_TASK = Ref{Union{Task,Nothing}}(nothing)
 const _ORIGINAL_ARGV = Ref{Vector{String}}(String[])
 # Whether this platform lacks a ZMQ IPC transport (Windows). When true, `serve`
 # coerces a requested `:ipc` gate to a local TCP bind and still advertises it for
@@ -202,7 +197,6 @@ const _GATE_TTY_SIZE =
     Ref{Union{Nothing,NamedTuple{(:rows, :cols),Tuple{Int,Int}}}}(nothing)
 const _GATE_TTY_ECHO_DISABLED = Ref{Bool}(false)
 const _GATE_TTY_PARKED_PGRP = Ref{Union{Int32,Nothing}}(nothing)
-const _ON_SHUTDOWN = Ref{Any}(nothing)
 
 # ── ROUTER request channel (protocol v2) ─────────────────────────────────────
 # The gate's request socket is a ROUTER. A single owner task (the message loop)
@@ -247,7 +241,6 @@ const _GATE_RCVTIMEO_IDLE = Ref{Int}(
 # fire callbacks on 0->1 / 1->0 transitions. TCP keepalive (set on the socket)
 # makes libzmq emit a dead viewer's unsubscribe so counts self-correct.
 const _STREAM_OUTBOX = Channel{Vector{Vector{UInt8}}}(Inf)  # each entry = one msg's frames
-const _STREAM_TASK = Ref{Union{Task,Nothing}}(nothing)
 const _STREAM_SUBS = Dict{String,Int}()                     # topic => live subscriber count
 const _STREAM_SUBS_LOCK = ReentrantLock()                   # guards _STREAM_SUBS + callbacks
 const _ON_STREAM_SUBSCRIBE = Any[]                          # f(topic::String) on 0->1
