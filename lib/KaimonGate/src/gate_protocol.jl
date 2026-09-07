@@ -231,12 +231,6 @@ function _base_julia_args()::Vector{String}
     return result
 end
 
-"""
-    _exec_restart(name, session_id, project_path)
-
-Replace the current process with a fresh Julia via `execvp`. Same PID, same
-terminal, fresh Julia state. The `-i` flag keeps the REPL interactive.
-"""
 # The `mode=:tcp, host, port, …` kwargs to replay on restart so the gate rebinds the SAME
 # endpoint a client is connected to. Only for an EXPLICIT remote TCP gate. A gate coerced
 # IPC→TCP on Windows (`coerced`) must instead restart as a plain :ipc gate (empty kwargs)
@@ -254,7 +248,19 @@ function _restart_tcp_kwargs(mode::Symbol, coerced::Bool, host::AbstractString,
     return base * curve_kw
 end
 
-function _exec_restart(name::String, session_id::String, project_path::String)
+"""
+    _exec_restart(name, session_id, project_path, snap)
+
+Replace this process with a fresh gate that reconstructs the same session.
+
+`snap` is the `GateSession` as it was BEFORE teardown. Both callers run `_cleanup()` first, so
+reading the live module state here would see it already reset — the gate would replay no
+endpoint at all and an explicit TCP gate would come back as a plain IPC one on a different
+port, with its namespace and its `allow_*` options dropped. `nothing` is tolerated (no gate
+was running) and falls back to the defaults.
+"""
+function _exec_restart(name::String, session_id::String, project_path::String,
+                       snap::Union{GateSession,Nothing} = nothing)
     # Signal to all serve() callers in the new process (startup.jl, app code,
     # or our injected -e fallback) that this is a restart and they should
     # reuse this session_id so the TUI reconnects to the same session.
@@ -271,15 +277,17 @@ function _exec_restart(name::String, session_id::String, project_path::String)
         # all launch flags (-t, --heap-size-hint, --gcthreads, -O, etc.), then
         # inject our own --project / -i / -e serve(...).
         julia_args = _base_julia_args()
-        ns      = _SESSION_NAMESPACE[]
-        mirror  = _ALLOW_MIRROR[]
-        restart = _ALLOW_RESTART[]
-        mode    = _MODE[]
+        ns      = snap === nothing ? ""   : snap.namespace
+        mirror  = snap === nothing ? true : snap.allow_mirror
+        restart = snap === nothing ? true : snap.allow_restart
+        mode    = snap === nothing ? :ipc : snap.mode
         ns_kwarg      = isempty(ns) ? "" : ", namespace=$(repr(ns))"
         mirror_kwarg  = mirror  ? "" : ", allow_mirror=false"
         restart_kwarg = restart ? "" : ", allow_restart=false"
-        tcp_kwargs = _restart_tcp_kwargs(mode, _LOCAL_TCP_COERCED[], _TCP_HOST[],
-            _TCP_PORT[], _TCP_STREAM_PORT[], _CURVE_ENABLED[], _CURVE_ALLOW_ANY[])
+        tcp_kwargs = snap === nothing ? "" :
+            _restart_tcp_kwargs(mode, snap.local_tcp_coerced, snap.tcp_host,
+                snap.tcp_port, snap.tcp_stream_port,
+                snap.curve_enabled, snap.curve_allow_any)
         # The injected -e code runs after startup.jl.  If startup.jl already
         # called serve() and picked up KAIMON_RESTART_SESSION, the gate
         # will already be running with the correct session_id; our serve() call
@@ -539,6 +547,8 @@ function handle_message(request::NamedTuple)
         old_name = string(get(request, :name, "julia"))
         old_session_id = _SESSION_ID[]
         old_project = dirname(Base.active_project())
+        # Taken before the _cleanup below, which resets the fields the replay needs.
+        old_session = _SESSION[]
 
         # Signal the message-loop task's `finally` block to skip _cleanup().
         # We need the ZMQ sockets to stay open for ~0.3 s so the :ok reply
@@ -559,7 +569,7 @@ function handle_message(request::NamedTuple)
                 @warn "Restart cleanup failed; proceeding to exec anyway" exception = (e, catch_backtrace())
             end
             try
-                _exec_restart(old_name, old_session_id, old_project)
+                _exec_restart(old_name, old_session_id, old_project, old_session)
             catch e
                 # execvp setup failed before the process could be replaced. Do NOT
                 # exit(1) — that drops to a shell. Leave the (now gate-less) REPL

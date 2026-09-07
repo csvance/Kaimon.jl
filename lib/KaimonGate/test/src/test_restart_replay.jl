@@ -92,40 +92,35 @@ end
 # into a local before tearing down (gate_serve.jl:764).
 @testset "restart replay survives teardown" begin
     KG = KaimonGate
-    prev = (KG._SESSION_ID[], KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
-            KG._TCP_PORT[], KG._TCP_STREAM_PORT[], KG._SESSION_NAMESPACE[],
-            KG._ALLOW_MIRROR[], KG._ALLOW_RESTART[])
+    prev = KG._SESSION[]
     withenv("XDG_CACHE_HOME" => mktempdir()) do
         try
             # An explicit remote TCP gate: not coerced, named, both options turned off.
-            KG._SESSION_ID[]        = "replay_probe"
-            KG._MODE[]              = :tcp
-            KG._LOCAL_TCP_COERCED[] = false
-            KG._TCP_HOST[]          = "0.0.0.0"
-            KG._TCP_PORT[]          = 9876
-            KG._TCP_STREAM_PORT[]   = 9877
-            KG._SESSION_NAMESPACE[] = "probe_ns"
-            KG._ALLOW_MIRROR[]      = false
-            KG._ALLOW_RESTART[]     = false
+            KG._SESSION[] = KG.GateSession(; id = "replay_probe", namespace = "probe_ns",
+                mode = :tcp, tcp_host = "0.0.0.0", tcp_port = 9876, tcp_stream_port = 9877,
+                local_tcp_coerced = false, allow_mirror = false, allow_restart = false,
+                running = true)
+            snap = KG._SESSION[]     # exactly what restart() holds on to before tearing down
 
-            KG._cleanup()   # what both restart paths do before building the command line
+            KG._cleanup()
 
-            # The exact expression _exec_restart evaluates at gate_protocol.jl:281-282.
-            kw = KG._restart_tcp_kwargs(KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
-                KG._TCP_PORT[], KG._TCP_STREAM_PORT[],
-                KG._CURVE_ENABLED[], KG._CURVE_ALLOW_ANY[])
+            # Teardown DROPS the session rather than clearing it in place, which is what
+            # leaves the snapshot usable. Were _cleanup to blank these fields instead, the
+            # capture would be worthless and the bug would be back.
+            @test KG._SESSION[] === nothing
+            @test snap.mode == :tcp
+            @test snap.namespace == "probe_ns"
+            @test snap.allow_mirror == false
+            @test snap.allow_restart == false
+
+            # The replay kwargs _exec_restart now builds from that snapshot.
+            kw = KG._restart_tcp_kwargs(snap.mode, snap.local_tcp_coerced, snap.tcp_host,
+                snap.tcp_port, snap.tcp_stream_port, snap.curve_enabled, snap.curve_allow_any)
             @test occursin("mode=:tcp", kw)
             @test occursin("port=9876", kw)
             @test occursin("stream_port=9877", kw)
-
-            # …and the three it reads at gate_protocol.jl:274-276.
-            @test KG._SESSION_NAMESPACE[] == "probe_ns"
-            @test KG._ALLOW_MIRROR[] == false
-            @test KG._ALLOW_RESTART[] == false
         finally
-            KG._SESSION_ID[], KG._MODE[], KG._LOCAL_TCP_COERCED[], KG._TCP_HOST[],
-                KG._TCP_PORT[], KG._TCP_STREAM_PORT[], KG._SESSION_NAMESPACE[],
-                KG._ALLOW_MIRROR[], KG._ALLOW_RESTART[] = prev
+            KG._SESSION[] = prev
         end
     end
 end

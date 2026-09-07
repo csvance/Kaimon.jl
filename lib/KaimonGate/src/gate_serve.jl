@@ -782,6 +782,10 @@ function restart()
     _RUNNING[] || error("Gate is not running")
     _ALLOW_RESTART[] || error("Restart is disabled for this session (allow_restart=false)")
     sid  = _SESSION_ID[]
+    # The replay configuration has to be taken BEFORE teardown, because _cleanup resets the
+    # very fields _exec_restart needs (mode, host, port, namespace, the allow_* flags). Holding
+    # the session keeps them: _cleanup nils _SESSION, but this reference stays live.
+    snap = _SESSION[]
     name = basename(dirname(something(Base.active_project(), "julia")))
     proj = dirname(something(Base.active_project(), "."))
 
@@ -806,7 +810,7 @@ function restart()
     catch e
         @warn "Restart cleanup failed; proceeding to exec anyway" exception = (e, catch_backtrace())
     end
-    _exec_restart(name, sid, proj)
+    _exec_restart(name, sid, proj, snap)
 end
 
 function _cleanup()
