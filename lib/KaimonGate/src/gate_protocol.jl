@@ -653,8 +653,8 @@ end
 
 # Drain whatever replies are ready onto the ROUTER (owner-only socket access).
 function _drain_gate_outbox!(socket::ZMQ.Socket)
-    while isready(_GATE_OUTBOX)
-        (identity, corr_id, reply) = take!(_GATE_OUTBOX)
+    while isready(_gate_outbox())
+        (identity, corr_id, reply) = take!(_gate_outbox())
         try
             _send_multipart(socket, Vector{UInt8}[identity, corr_id, reply])
         catch
@@ -688,9 +688,9 @@ function _serve_request(identity::Vector{UInt8}, corr_id::Vector{UInt8}, request
             serialize(io, (type = :error,
                            message = "reply not serializable: $(sprint(showerror, e))"))
         end
-        put!(_GATE_OUTBOX, (identity, corr_id, take!(io)))
+        put!(_gate_outbox(), (identity, corr_id, take!(io)))
     finally
-        Threads.atomic_sub!(_GATE_INFLIGHT, 1)
+        Threads.atomic_sub!(_gate_inflight(), 1)
     end
     return nothing
 end
@@ -730,7 +730,7 @@ function message_loop(socket::ZMQ.Socket)
 
             # 2. backpressure: at the worker cap, let the outbox drain before
             #    accepting more. Pending requests stay queued in the ROUTER.
-            if _GATE_INFLIGHT[] >= _GATE_MAX_WORKERS[]
+            if _gate_inflight()[] >= _GATE_MAX_WORKERS[]
                 sleep(0.005)
                 continue
             end
@@ -738,7 +738,7 @@ function message_loop(socket::ZMQ.Socket)
             # 2b. pick recv timeout: poll fast while a reply may be in flight (a
             #     worker running, or one already queued between drain and now),
             #     else wait long. Owner-only socket access, so setsockopt is safe.
-            want_rcvtimeo = (_GATE_INFLIGHT[] > 0 || isready(_GATE_OUTBOX)) ?
+            want_rcvtimeo = (_gate_inflight()[] > 0 || isready(_gate_outbox())) ?
                             _GATE_RCVTIMEO_BUSY[] : _GATE_RCVTIMEO_IDLE[]
             if want_rcvtimeo != cur_rcvtimeo
                 socket.rcvtimeo = want_rcvtimeo
@@ -757,13 +757,13 @@ function message_loop(socket::ZMQ.Socket)
             catch
                 io = IOBuffer()
                 serialize(io, (type = :error, message = "malformed request"))
-                put!(_GATE_OUTBOX, (identity, corr_id, take!(io)))
+                put!(_gate_outbox(), (identity, corr_id, take!(io)))
                 continue
             end
 
             # 4. hand off to a worker — DO NOT run inline (a slow sync eval or a
             #    blocked debug_eval must not stall intake / pings).
-            Threads.atomic_add!(_GATE_INFLIGHT, 1)
+            Threads.atomic_add!(_gate_inflight(), 1)
             Threads.@spawn _serve_request(identity, corr_id, request)
         catch e
             _running() || break   # clean shutdown
@@ -794,7 +794,7 @@ function message_loop(socket::ZMQ.Socket)
     # :ok that the client is still waiting on) get flushed before teardown. The
     # :restart handler then sleeps 0.3s before execvp, so the reply lands.
     deadline = time() + 1.0
-    while (isready(_GATE_OUTBOX) || _GATE_INFLIGHT[] > 0) && time() < deadline
+    while (isready(_gate_outbox()) || _gate_inflight()[] > 0) && time() < deadline
         try
             _drain_gate_outbox!(socket)
         catch

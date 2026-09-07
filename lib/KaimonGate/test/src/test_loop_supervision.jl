@@ -28,8 +28,8 @@ end
 # ── Worker-slot accounting ────────────────────────────────────────────────────
 
 function _drain_outbox!()
-    while isready(KG._GATE_OUTBOX)
-        take!(KG._GATE_OUTBOX)
+    while isready(KG._gate_outbox())
+        take!(KG._gate_outbox())
     end
 end
 
@@ -39,30 +39,30 @@ end
     KG._SESSION[] = KG.GateSession(; running = true)
     try
         _drain_outbox!()
-        base = KG._GATE_INFLIGHT[]
+        base = KG._gate_inflight()[]
         id, cid = UInt8[1, 2], UInt8[3, 4]
 
         # Normal path: a ping is handled, replied to, and the slot comes back.
-        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        Threads.atomic_add!(KG._gate_inflight(), 1)
         KG._serve_request(id, cid, (type = :ping,))
-        @test KG._GATE_INFLIGHT[] == base
-        (rid, rcid, bytes) = take!(KG._GATE_OUTBOX)
+        @test KG._gate_inflight()[] == base
+        (rid, rcid, bytes) = take!(KG._gate_outbox())
         @test rid == id && rcid == cid
         @test deserialize(IOBuffer(bytes)).type === :pong
         @test KG._ping_count() == 1        # counted against this session, not a global
 
         # handle_message cannot dispatch a non-NamedTuple: error reply, slot released.
-        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        Threads.atomic_add!(KG._gate_inflight(), 1)
         KG._serve_request(id, cid, Dict(:type => :ping))
-        @test KG._GATE_INFLIGHT[] == base
-        reply = deserialize(IOBuffer(take!(KG._GATE_OUTBOX)[3]))
+        @test KG._gate_inflight()[] == base
+        reply = deserialize(IOBuffer(take!(KG._gate_outbox())[3]))
         @test reply.type === :error
 
         # An unknown request type is still a reply, not a leaked slot.
-        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        Threads.atomic_add!(KG._gate_inflight(), 1)
         KG._serve_request(id, cid, (type = :no_such_message,))
-        @test KG._GATE_INFLIGHT[] == base
-        @test isready(KG._GATE_OUTBOX)
+        @test KG._gate_inflight()[] == base
+        @test isready(KG._gate_outbox())
         _drain_outbox!()
     finally
         KG._SESSION[] = saved

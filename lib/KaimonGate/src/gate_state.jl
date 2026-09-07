@@ -201,23 +201,23 @@ const _GATE_TTY_PARKED_PGRP = Ref{Union{Int32,Nothing}}(nothing)
 # ── ROUTER request channel (protocol v2) ─────────────────────────────────────
 # The gate's request socket is a ROUTER. A single owner task (the message loop)
 # is the ONLY thing that touches it — it interleaves recv (new requests) with
-# draining replies that worker tasks hand back via _GATE_OUTBOX, routed to the
+# draining replies that worker tasks hand back via _gate_outbox(), routed to the
 # right client by ROUTER identity. Workers never touch the socket, so a slow
 # handler (a multi-second sync eval, or a blocked debug_eval) can't stall intake.
 # Each outbox entry is (identity, corr_id, reply-bytes); the corr_id is echoed
 # back so the client DEALER can demultiplex concurrent in-flight requests.
-const _GATE_OUTBOX =
-    Channel{Tuple{Vector{UInt8},Vector{UInt8},Vector{UInt8}}}(Inf)
+# The outbox and the in-flight counter are session fields (see GateSession), built fresh per
+# session so a same-process restart cannot inherit a half-drained queue.
+#
 # Backstop on concurrent worker tasks so a request storm can't spawn unbounded
 # tasks. At the cap the owner stops accepting new requests; pending requests
 # stay queued in the ROUTER (client DEALER blocks in its own recv) until a slot
 # frees. Env-overridable.
-const _GATE_INFLIGHT = Threads.Atomic{Int}(0)
 const _GATE_MAX_WORKERS = Ref{Int}(
     something(tryparse(Int, get(ENV, "KAIMON_GATE_MAX_WORKERS", "")), 16))
 
 # Adaptive owner-loop recv timeout (ms). The owner blocks in recv, so worker
-# replies queued in _GATE_OUTBOX only flush when the recv returns. A flat 200ms
+# replies queued in _gate_outbox() only flush when the recv returns. A flat 200ms
 # meant every reply waited up to a full timeout before going out — ~5 req/s,
 # which capped all input (key/click/drag/resize each round-trips a tool call)
 # and was the drag-lag root cause. Instead the loop polls fast (BUSY) while a
@@ -232,7 +232,7 @@ const _GATE_RCVTIMEO_IDLE = Ref{Int}(
 
 # ── Stream broadcaster (XPUB) + subscriber presence ──────────────────────────
 # The stream socket is an XPUB (drop-in for SUB clients) owned by ONE task: the
-# broadcaster. It interleaves draining _STREAM_OUTBOX (publish work, the hot
+# broadcaster. It interleaves draining _stream_outbox() (publish work, the hot
 # stdout path) with recv'ing XPUB subscription frames — so the same task that
 # sends also reads subscription events, satisfying ZMQ's single-owner rule (no
 # more _PUB_LOCK multi-writer send). Publishers just enqueue frames.
@@ -240,14 +240,16 @@ const _GATE_RCVTIMEO_IDLE = Ref{Int}(
 # XPUB_VERBOSER delivers every sub/unsub; we tally per topic in _STREAM_SUBS and
 # fire callbacks on 0->1 / 1->0 transitions. TCP keepalive (set on the socket)
 # makes libzmq emit a dead viewer's unsubscribe so counts self-correct.
-const _STREAM_OUTBOX = Channel{Vector{Vector{UInt8}}}(Inf)  # each entry = one msg's frames
+# The publish queue is a session field (see GateSession). The presence table, its lock and
+# the callbacks are NOT: a host registers `on_stream_subscribe` BEFORE calling `serve`, so a
+# session field would be constructed empty and drop the registration on the floor.
 const _STREAM_SUBS = Dict{String,Int}()                     # topic => live subscriber count
 const _STREAM_SUBS_LOCK = ReentrantLock()                   # guards _STREAM_SUBS + callbacks
 const _ON_STREAM_SUBSCRIBE = Any[]                          # f(topic::String) on 0->1
 const _ON_STREAM_UNSUBSCRIBE = Any[]                        # f(topic::String) on 1->0
 const _STREAM_RECONCILE_EVERY = 5.0                         # seconds between hygiene passes
 
-# Empty-frames sentinel: enqueued into _STREAM_OUTBOX purely to WAKE the
+# Empty-frames sentinel: enqueued into _stream_outbox() purely to WAKE the
 # broadcaster (which blocks on `take!`). `_stream_send` on zero frames is a no-op,
 # so it carries no wire traffic. Used by the sub-poll tick and the shutdown nudge.
 const _STREAM_WAKE = Vector{UInt8}[]

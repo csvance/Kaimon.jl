@@ -17,7 +17,10 @@
 #      So are the reflection caches: they key on a file's stamp and a handler's identity, so
 #      two sessions should share them and a restart should keep them warm.
 #      `_ORIGINAL_ARGV` looks session-ish but is captured once per process and must survive
-#      restarts, which is the whole point of it.
+#      restarts, which is the whole point of it. The stream-presence callbacks
+#      (`_ON_STREAM_SUBSCRIBE`/`_UNSUBSCRIBE`) are process scope for a sharper reason: a host
+#      registers them BEFORE calling `serve`, so a session field would be constructed empty
+#      and silently discard them.
 #
 #   3. CONFIGURATION (module-level) — read from `ENV` at load and effectively constant:
 #      `_GATE_MAX_WORKERS`, `_GATE_RCVTIMEO_BUSY`/`_IDLE`, `_STREAM_SUBPOLL_INTERVAL`,
@@ -89,10 +92,6 @@ mutable struct GateSession
     outbox::Channel{Tuple{Vector{UInt8},Vector{UInt8},Vector{UInt8}}}
     inflight::Threads.Atomic{Int}
     stream_outbox::Channel{Vector{Vector{UInt8}}}
-    stream_subs::Dict{String,Int}
-    stream_subs_lock::ReentrantLock
-    on_stream_subscribe::Vector{Any}
-    on_stream_unsubscribe::Vector{Any}
 end
 
 function GateSession(;
@@ -144,7 +143,6 @@ function GateSession(;
         Channel{Tuple{Vector{UInt8},Vector{UInt8},Vector{UInt8}}}(Inf),
         Threads.Atomic{Int}(0),
         Channel{Vector{Vector{UInt8}}}(Inf),
-        Dict{String,Int}(), ReentrantLock(), Any[], Any[],
     )
 end
 
@@ -272,12 +270,8 @@ _session_tools()    = (s = _SESSION[]; s === nothing ? GateTool[] : s.tools)
 _session_tools!(v)  = (_session().tools = v)
 
 # Containers are mutated in place and never reassigned, so they need no setter. Callers that
-# used the bare name (`isready(_GATE_OUTBOX)`, `atomic_add!(_GATE_INFLIGHT, 1)`) call these
+# used the bare name (`isready(_gate_outbox())`, `atomic_add!(_gate_inflight(), 1)`) call these
 # instead; note `_gate_inflight()[]` is still the atomic load.
 _gate_outbox()           = _session().outbox
 _gate_inflight()         = _session().inflight
 _stream_outbox()         = _session().stream_outbox
-_stream_subs()           = _session().stream_subs
-_stream_subs_lock()      = _session().stream_subs_lock
-_on_stream_subscribe()   = _session().on_stream_subscribe
-_on_stream_unsubscribe() = _session().on_stream_unsubscribe

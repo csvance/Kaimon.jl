@@ -93,7 +93,7 @@ function _drain_xpub_events(sock::ZMQ.Socket)
     return
 end
 
-# The XPUB's single owner — fully event-driven. BLOCKS on `take!(_STREAM_OUTBOX)`
+# The XPUB's single owner — fully event-driven. BLOCKS on `take!(_stream_outbox())`
 # (zero idle CPU): a publish wakes it instantly. The only periodic wake is a slow
 # liveness `tick` that nudges it to service the rare XPUB sub/unsub event during
 # total idle (those arrive on the socket, not the channel, so they can't ride the
@@ -104,22 +104,22 @@ end
 function _stream_broadcaster(sock::ZMQ.Socket)
     last_reconcile = time()
     tick = Timer(_STREAM_SUBPOLL_INTERVAL[]; interval = _STREAM_SUBPOLL_INTERVAL[]) do _
-        try; put!(_STREAM_OUTBOX, _STREAM_WAKE); catch; end
+        try; put!(_stream_outbox(), _STREAM_WAKE); catch; end
     end
     try
         while _running()
             # Block until woken by a publish, the sub-poll tick, or the shutdown
             # nudge. _STREAM_WAKE (empty frames) carries no data — just a wake.
             frames = try
-                take!(_STREAM_OUTBOX)
+                take!(_stream_outbox())
             catch
                 break  # outbox closed → exit
             end
             _running() || break
             _safe_stream_send(sock, frames)
             # Coalesce any further-queued publishes (owner-only send).
-            while isready(_STREAM_OUTBOX)
-                f = try; take!(_STREAM_OUTBOX); catch; break; end
+            while isready(_stream_outbox())
+                f = try; take!(_stream_outbox()); catch; break; end
                 _safe_stream_send(sock, f)
             end
             # Service all pending XPUB sub/unsub events on every wake.
@@ -135,8 +135,8 @@ function _stream_broadcaster(sock::ZMQ.Socket)
     end
     # Final bounded drain so late lifecycle messages (eval_complete) flush.
     deadline = time() + 1.0
-    while isready(_STREAM_OUTBOX) && time() < deadline
-        f = try; take!(_STREAM_OUTBOX); catch; break; end
+    while isready(_stream_outbox()) && time() < deadline
+        f = try; take!(_stream_outbox()); catch; break; end
         _safe_stream_send(sock, f)
     end
     return nothing
@@ -190,7 +190,7 @@ function _publish_stream(channel::String, data; request_id::String = "")
         (channel = channel, data = data, request_id = request_id)
     serialize(io, msg)
     try
-        put!(_STREAM_OUTBOX, Vector{UInt8}[take!(io)])
+        put!(_stream_outbox(), Vector{UInt8}[take!(io)])
     catch e
         # The caller hangs if eval-lifecycle messages are lost.
         if channel in ("eval_complete", "eval_error", "tool_complete", "tool_error")
@@ -229,7 +229,7 @@ function _publish_stream_raw(channel::AbstractString, payload::Vector{UInt8})
         for i in eachindex(cb); header[2 + i] = cb[i]; end
     end
     try
-        put!(_STREAM_OUTBOX, Vector{UInt8}[header, payload])
+        put!(_stream_outbox(), Vector{UInt8}[header, payload])
     catch e
         @debug "raw stream publish failed" channel = channel exception = e
     end
@@ -258,7 +258,7 @@ function publish(topic::AbstractString, payload)
     serialize(io, payload)
     frames = Vector{UInt8}[Vector{UInt8}(codeunits(String(topic))), take!(io)]
     try
-        put!(_STREAM_OUTBOX, frames)
+        put!(_stream_outbox(), frames)
     catch e
         @debug "publish enqueue failed" topic = topic exception = e
     end

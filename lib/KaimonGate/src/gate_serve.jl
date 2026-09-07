@@ -685,7 +685,7 @@ end
 
 Per-socket options for the request ROUTER, applied by `serve` and replayed by
 `_ensure_router!` on a rebind. The receive timeout makes the owner loop cycle
-back to drain `_GATE_OUTBOX` and re-check `_running()` (`message_loop` then adapts
+back to drain `_gate_outbox()` and re-check `_running()` (`message_loop` then adapts
 it per iteration, see `_GATE_RCVTIMEO_BUSY`/`_IDLE`); `linger = 0` so `close()`
 does not block; the CURVE server role reuses the context-wide keypair and ZAP
 handler `serve` set up.
@@ -836,7 +836,7 @@ function _cleanup()
         # bare _running()=false won't wake it — nudge with the wake sentinel so its
         # `take!` returns and it observes the flag (else we'd wait a full sub-poll
         # interval for the liveness tick).
-        try; put!(_STREAM_OUTBOX, _STREAM_WAKE); catch; end
+        try; put!(_stream_outbox(), _STREAM_WAKE); catch; end
         try; wait(stask); catch; end
     end
     _stream_task!(nothing)
@@ -858,15 +858,15 @@ function _cleanup()
     end
     # Drain any undelivered worker replies and reset the worker counter so a
     # restart (same process, fresh serve()) starts with an empty channel.
-    while isready(_GATE_OUTBOX)
-        try; take!(_GATE_OUTBOX); catch; break; end
+    while isready(_gate_outbox())
+        try; take!(_gate_outbox()); catch; break; end
     end
-    Threads.atomic_xchg!(_GATE_INFLIGHT, 0)
+    Threads.atomic_xchg!(_gate_inflight(), 0)
 
     # Drain leftover stream publishes and clear presence state (the broadcaster
     # has already stopped above) so a same-process restart starts clean.
-    while isready(_STREAM_OUTBOX)
-        try; take!(_STREAM_OUTBOX); catch; break; end
+    while isready(_stream_outbox())
+        try; take!(_stream_outbox()); catch; break; end
     end
     lock(_STREAM_SUBS_LOCK) do
         empty!(_STREAM_SUBS)
