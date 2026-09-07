@@ -461,6 +461,26 @@ function _serve(;
     # Async handlers (eval_async, tool_call_async) use Threads.@spawn to run
     # on the default thread pool, keeping this interactive thread free to
     # answer pings during CPU-intensive operations.
+    # Everything above has resolved this gate's identity, so gather it into one session.
+    # Built here, before any task spawns, so the tasks see a complete session. Call sites are
+    # migrating onto it field by field; until they all have, the module Refs are kept in step
+    # and remain the source of truth.
+    _SESSION[] = GateSession(;
+        id = _SESSION_ID[], namespace = _SESSION_NAMESPACE[], mode = _MODE[],
+        tcp_host = _TCP_HOST[], tcp_port = _TCP_PORT[],
+        tcp_stream_port = _TCP_STREAM_PORT[], auth_token = _AUTH_TOKEN[],
+        local_tcp_coerced = _LOCAL_TCP_COERCED[], allow_mirror = _ALLOW_MIRROR[],
+        allow_restart = _ALLOW_RESTART[], mirror_repl = _MIRROR_REPL[],
+        start_time = _START_TIME[],
+        context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
+        stream_socket = _STREAM_SOCKET[], stream_endpoint = _STREAM_ENDPOINT[],
+        curve_enabled = _CURVE_ENABLED[], curve_allow_any = _CURVE_ALLOW_ANY[],
+        curve_server_secret = _CURVE_SERVER_SECRET[],
+        curve_server_public = _CURVE_SERVER_PUBLIC[],
+        zap_socket = _ZAP_SOCKET[], zap_task = _ZAP_TASK[],
+        on_shutdown = _ON_SHUTDOWN[], tools = _SESSION_TOOLS[],
+        running = true,
+    )
     _RUNNING[] = true
     # Broadcaster owns the XPUB stream socket (send + subscription recv). Runs on
     # :interactive so it stays scheduled alongside the message loop.
@@ -887,6 +907,12 @@ function _cleanup()
     _MODE[] = :ipc
     _LOCAL_TCP_COERCED[] = false
     _ON_SHUTDOWN[] = nothing
+
+    # Dropping the session IS the teardown: every field goes with it, including the outbox,
+    # the in-flight count and the subscriber table, which the resets above had to clear by
+    # hand and which a same-process restart used to inherit. The named resets remain only
+    # while call sites still read the module Refs.
+    _SESSION[] = nothing
 end
 
 """
