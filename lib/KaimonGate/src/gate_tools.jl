@@ -547,7 +547,13 @@ function _reflect_tool(tool::GateTool)
         hit === nothing || return copy(hit)
     end
     meta = _reflect_tool_uncached(tool)
-    key === nothing || lock(_SRC_LOCK) do; _REFLECT_CACHE[key] = copy(meta); end
+    key === nothing || lock(_SRC_LOCK) do
+        # One live entry per tool name. Every re-registration is a new closure and every
+        # source edit is a new stamp, so without this the cache gains an entry per tool per
+        # reload and never gives one back — unbounded on a long-lived gate under Revise.
+        filter!(kv -> kv.first[1] != tool.name, _REFLECT_CACHE)
+        _REFLECT_CACHE[key] = copy(meta)
+    end
     return meta
 end
 

@@ -116,5 +116,10 @@ end
         # layout, so the handler's recorded line still points at its own definition.
         write(path, fixture("Greet somebody loudly"))
         @test KaimonGate._reflect_tool(tool)["description"] == "Greet somebody loudly"
+
+        # The superseded entry is dropped rather than kept alongside the new one. Each edit and
+        # each re-registration produces a fresh key, so without this the cache would gain an
+        # entry per reload for the life of the process.
+        @test length(KaimonGate._REFLECT_CACHE) == 1
     end
 end
