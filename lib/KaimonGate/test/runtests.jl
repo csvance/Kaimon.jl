@@ -1,3 +1,15 @@
+# Isolate the cache/socket directory for the whole suite, the way Kaimon's own runtests.jl
+# does. Several files here bind REAL gate sockets and write discovery metadata under
+# `sock_dir()`. Unisolated that is the developer's live `~/.cache/kaimon/sock`, where a
+# running Kaimon is discovering sessions and reaping stale ones — so it would delete a
+# metadata file out from under a test that had just written it, intermittently and only on a
+# machine with a gate running. `_gate_cache_dir` reads these at runtime, so setting them here
+# is enough.
+let cache = mktempdir()
+    ENV["XDG_CACHE_HOME"] = cache                 # Unix
+    Sys.iswindows() && (ENV["LOCALAPPDATA"] = cache)
+end
+
 using SafeTestsets
 
 @safetestset "Aqua" include("src/test_aqua.jl")
