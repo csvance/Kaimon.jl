@@ -147,25 +147,29 @@ end
     token = "test_token_$(bytes2hex(rand(UInt8, 8)))"
     session_id = "test-tcp-$(bytes2hex(rand(UInt8, 4)))"
 
-    KaimonGate._AUTH_TOKEN[] = token
-    KaimonGate._serve(
-        name="test-tcp",
-        session_id=session_id,
-        force=true,
-        mode=:tcp,
-        host="127.0.0.1",
-        port=0,
-    )
+    # The token is an INPUT to _serve, which resolves it from the environment (or the host
+    # provider) into the session it builds. Presetting the old Ref no longer reaches it.
+    withenv("KAIMON_GATE_TOKEN" => token) do
+        KaimonGate._serve(
+            name="test-tcp",
+            session_id=session_id,
+            force=true,
+            mode=:tcp,
+            host="127.0.0.1",
+            port=0,
+        )
+    end
     sleep(0.2)
 
     @test KaimonGate._running()
     @test KaimonGate._mode() == :tcp
+    @test KaimonGate._auth_token() == token
     sock = KaimonGate._GATE_SOCKET[]
     @test sock !== nothing
     rep_endpoint = rstrip(ZMQ._get_last_endpoint(sock), '\0')
     @test startswith(rep_endpoint, "tcp://")
-    @test !isempty(KaimonGate._STREAM_ENDPOINT[])
-    @test startswith(KaimonGate._STREAM_ENDPOINT[], "tcp://")
+    @test !isempty(KaimonGate._stream_endpoint())
+    @test startswith(KaimonGate._stream_endpoint(), "tcp://")
 
     ctx = ZMQ.Context()
     req = ZMQ.Socket(ctx, ZMQ.REQ)
@@ -199,7 +203,7 @@ end
     end
 
     @test !KaimonGate._running()
-    @test isempty(KaimonGate._AUTH_TOKEN[])
+    @test isempty(KaimonGate._auth_token())
 end
 
 # ── discoverable flag: serve without advertising in the discovery registry ─────

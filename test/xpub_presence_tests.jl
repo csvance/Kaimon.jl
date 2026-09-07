@@ -32,7 +32,7 @@ using Kaimon
             KG.on_stream_unsubscribe(t -> push!(left, t))
 
             KG.serve(force = true)
-            ep = KG._STREAM_ENDPOINT[]
+            ep = KG._stream_endpoint()
             @assert !isempty(ep) "no stream endpoint"
 
             ctx = ZMQ.Context()

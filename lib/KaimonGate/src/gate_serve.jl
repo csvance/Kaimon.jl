@@ -209,7 +209,7 @@ function _serve(;
     # Remember whether this TCP gate is a coerced-local one (vs an explicit remote gate),
     # so restart can reproduce the coercion instead of pinning it to mode=:tcp (which would
     # drop discovery metadata and orphan the restarted session).
-    _LOCAL_TCP_COERCED[] = local_gate && mode === :tcp
+    local_tcp_coerced = local_gate && mode === :tcp
 
     # Restart gate: if KAIMON_RESTART_SESSION is set the current process was
     # launched by _exec_restart.  Any serve() call — whether from startup.jl,
@@ -343,16 +343,17 @@ function _serve(;
     # Standalone there's no host token, so the gate is open unless the env var is
     # set; full Kaimon injects a token derived from its security config via
     # set_auth_token_provider!.
+    auth_token = ""
     if mode == :tcp
         env_token = get(ENV, "KAIMON_GATE_TOKEN", "")
         if !isempty(env_token)
-            _AUTH_TOKEN[] = env_token
+            auth_token = env_token
         else
             # Host-provided token (Kaimon derives it from its security config).
             # Standalone the default provider returns "" — no auth, same as :lax.
             try
                 tok = Base.invokelatest(_AUTH_TOKEN_PROVIDER[])
-                isempty(tok) || (_AUTH_TOKEN[] = tok)
+                isempty(tok) || (auth_token = tok)
             catch
                 # No provider/config — no auth (same as lax)
             end
@@ -379,13 +380,15 @@ function _serve(;
 
     # Bind endpoint — IPC (local socket file) or TCP (network port)
     # TCP mode supports port=0 for ephemeral port assignment (ZMQ picks a free port).
+    tcp_host, tcp_port, tcp_stream_port = "127.0.0.1", 0, 0   # unused by an IPC gate
     if mode == :tcp
         bind(socket, "tcp://$(host):$(port)")
         endpoint = rstrip(ZMQ._get_last_endpoint(socket), '\0')
-        # Store resolved TCP settings for restart replay
-        _TCP_HOST[] = host
+        # Keep the RESOLVED settings for restart replay and for a supervisor rebind: a gate
+        # asked for port 0 must come back on the port it actually got, not on 0.
+        tcp_host = host
         m = match(r":(\d+)$", endpoint)
-        _TCP_PORT[] = m !== nothing ? parse(Int, m.captures[1]) : port
+        tcp_port = m !== nothing ? parse(Int, m.captures[1]) : port
     else
         sock_path = joinpath(sock_dir(),"$(sid).sock")
         endpoint = "ipc://$(sock_path)"
@@ -422,13 +425,12 @@ function _serve(;
         bind(pub_socket, "tcp://$(host):$(stream_port)")
         stream_endpoint = rstrip(ZMQ._get_last_endpoint(pub_socket), '\0')
         m = match(r":(\d+)$", stream_endpoint)
-        _TCP_STREAM_PORT[] = m !== nothing ? parse(Int, m.captures[1]) : stream_port
+        tcp_stream_port = m !== nothing ? parse(Int, m.captures[1]) : stream_port
     else
         stream_endpoint = "ipc://$(joinpath(sock_dir(),"$(sid)-stream.sock"))"
         bind(pub_socket, stream_endpoint)
     end
     _STREAM_SOCKET[] = pub_socket
-    _STREAM_ENDPOINT[] = stream_endpoint
 
     # Write metadata file for session discovery. Written for every LOCAL gate: real IPC
     # gates, and Windows gates that were coerced IPC → TCP (`local_gate`) — the server
@@ -463,13 +465,13 @@ function _serve(;
     # and remain the source of truth.
     _SESSION[] = GateSession(;
         id = sid, namespace = namespace, mode = mode,
-        tcp_host = _TCP_HOST[], tcp_port = _TCP_PORT[],
-        tcp_stream_port = _TCP_STREAM_PORT[], auth_token = _AUTH_TOKEN[],
-        local_tcp_coerced = _LOCAL_TCP_COERCED[], allow_mirror = allow_mirror,
+        tcp_host = tcp_host, tcp_port = tcp_port,
+        tcp_stream_port = tcp_stream_port, auth_token = auth_token,
+        local_tcp_coerced = local_tcp_coerced, allow_mirror = allow_mirror,
         allow_restart = allow_restart, mirror_repl = mirror_repl,
         start_time = start_time,
         context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
-        stream_socket = _STREAM_SOCKET[], stream_endpoint = _STREAM_ENDPOINT[],
+        stream_socket = _STREAM_SOCKET[], stream_endpoint = stream_endpoint,
         curve_enabled = _CURVE_ENABLED[], curve_allow_any = _CURVE_ALLOW_ANY[],
         curve_server_secret = _CURVE_SERVER_SECRET[],
         curve_server_public = _CURVE_SERVER_PUBLIC[],
@@ -594,9 +596,9 @@ function _serve(;
         printstyled("  TCP mode: "; color = :light_black)
         printstyled("$endpoint"; color = :cyan)
         printstyled(" (PUB: $stream_endpoint)\n"; color = :light_black)
-        if !isempty(_AUTH_TOKEN[])
+        if !isempty(_auth_token())
             printstyled("  Auth token: "; color = :light_black)
-            printstyled("$(_AUTH_TOKEN[])\n"; color = :yellow)
+            printstyled("$(_auth_token())\n"; color = :yellow)
         else
             printstyled("  Auth: "; color = :light_black)
             printstyled("none (lax mode)\n"; color = :yellow)
@@ -719,7 +721,7 @@ function _ensure_router!(sock::ZMQ.Socket)
     new = _zmq_socket(ctx, ROUTER)
     _configure_router_socket!(new; curve = _CURVE_ENABLED[], allow_any = _CURVE_ALLOW_ANY[])
     endpoint = if _mode() == :tcp
-        "tcp://$(_TCP_HOST[]):$(_TCP_PORT[])"
+        "tcp://$(_tcp_host()):$(_tcp_port())"
     else
         sock_path = joinpath(sock_dir(), "$(_session_id()).sock")
         rm(sock_path; force = true)
@@ -884,8 +886,6 @@ function _cleanup()
     _CURVE_SERVER_PUBLIC[] = ""
     _GATE_SOCKET[] = nothing
     _STREAM_SOCKET[] = nothing
-    _STREAM_ENDPOINT[] = ""
-    _AUTH_TOKEN[] = ""
     _SERVICE_SOCKET[] = nothing
     _GATE_CONTEXT[] = nothing
 
@@ -897,7 +897,6 @@ function _cleanup()
     _restarting!(false)
     _shutting_down!(false)
     _SESSION_TOOLS[] = GateTool[]
-    _LOCAL_TCP_COERCED[] = false
     _ON_SHUTDOWN[] = nothing
 
     # Dropping the session IS the teardown: every field goes with it, including the outbox,
@@ -924,13 +923,13 @@ function status()
         println("  Uptime:    $(mins)m")
         println("  PID:       $(getpid())")
         println("  ROUTER:    $rep_ep")
-        println("  PUB:       $(_STREAM_ENDPOINT[])")
+        println("  PUB:       $(_stream_endpoint())")
         println("  Mirror:    $(_mirror_repl())")
         println("  Tools:     $(length(_SESSION_TOOLS[]))")
         println("  Pings:     $(_ping_count())$(  _last_ping_time() > 0 ? " (last $(round(Int, time() - _last_ping_time()))s ago)" : "")")
         println("  Messages:  $(_msg_count())")
         if _mode() == :tcp
-            auth = isempty(_AUTH_TOKEN[]) ? "none (lax)" : "token"
+            auth = isempty(_auth_token()) ? "none (lax)" : "token"
             println("  Auth:      $auth")
         end
     else

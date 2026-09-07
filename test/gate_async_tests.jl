@@ -217,28 +217,28 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 @testset "Gate TCP auth" begin
-    orig_token = Kaimon.KaimonGate._AUTH_TOKEN[]
+    orig_token = Kaimon.KaimonGate._auth_token()
     # handle_message counts every message against the session, so it needs one to exist.
     orig_session = Kaimon.KaimonGate._SESSION[]
     Kaimon.KaimonGate._SESSION[] = Kaimon.KaimonGate.GateSession(; running = true)
 
     @testset "IPC mode skips auth" begin
         Kaimon.KaimonGate._mode!(:ipc)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
+        Kaimon.KaimonGate._auth_token!("secret123")
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :pong
     end
 
     @testset "TCP mode with empty token skips auth" begin
         Kaimon.KaimonGate._mode!(:tcp)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = ""
+        Kaimon.KaimonGate._auth_token!("")
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :pong
     end
 
     @testset "TCP mode rejects missing token" begin
         Kaimon.KaimonGate._mode!(:tcp)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
+        Kaimon.KaimonGate._auth_token!("secret123")
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :error
         @test occursin("Authentication", resp.message)
@@ -246,7 +246,7 @@ end
 
     @testset "TCP mode rejects wrong token" begin
         Kaimon.KaimonGate._mode!(:tcp)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
+        Kaimon.KaimonGate._auth_token!("secret123")
         resp = Kaimon.KaimonGate.handle_message((type = :ping, token = "wrong"))
         @test resp.type == :error
         @test occursin("Authentication", resp.message)
@@ -254,23 +254,23 @@ end
 
     @testset "TCP mode accepts correct token" begin
         Kaimon.KaimonGate._mode!(:tcp)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
+        Kaimon.KaimonGate._auth_token!("secret123")
         resp = Kaimon.KaimonGate.handle_message((type = :ping, token = "secret123"))
         @test resp.type == :pong
     end
 
     @testset "pong includes stream_endpoint" begin
         Kaimon.KaimonGate._mode!(:ipc)
-        Kaimon.KaimonGate._AUTH_TOKEN[] = ""
-        Kaimon.KaimonGate._STREAM_ENDPOINT[] = "ipc:///tmp/test-stream.sock"
+        Kaimon.KaimonGate._auth_token!("")
+        Kaimon.KaimonGate._stream_endpoint!("ipc:///tmp/test-stream.sock")
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :pong
         @test resp.stream_endpoint == "ipc:///tmp/test-stream.sock"
-        Kaimon.KaimonGate._STREAM_ENDPOINT[] = ""
+        Kaimon.KaimonGate._stream_endpoint!("")
     end
 
     # mode rides on the session, so restoring that restores it too.
-    Kaimon.KaimonGate._AUTH_TOKEN[] = orig_token
+    Kaimon.KaimonGate._auth_token!(orig_token)
     Kaimon.KaimonGate._SESSION[] = orig_session
 end
 
@@ -288,15 +288,18 @@ end
     token = "test_token_$(bytes2hex(rand(UInt8, 8)))"
     session_id = "test-tcp-$(bytes2hex(rand(UInt8, 4)))"
 
-    Kaimon.KaimonGate._AUTH_TOKEN[] = token
-    Kaimon.KaimonGate._serve(
-        name = "test-tcp",
-        session_id = session_id,
-        force = true,
-        mode = :tcp,
-        host = "127.0.0.1",
-        port = 0,
-    )
+    # _serve resolves the token from the environment into the session it builds; setting it
+    # on the outgoing session would be discarded when that new session replaces it.
+    withenv("KAIMON_GATE_TOKEN" => token) do
+        Kaimon.KaimonGate._serve(
+            name = "test-tcp",
+            session_id = session_id,
+            force = true,
+            mode = :tcp,
+            host = "127.0.0.1",
+            port = 0,
+        )
+    end
     sleep(0.2)
 
     @test Kaimon.KaimonGate._running()
@@ -307,8 +310,8 @@ end
     rep_endpoint = rstrip(ZMQ._get_last_endpoint(sock), '\0')
     @test startswith(rep_endpoint, "tcp://")
 
-    @test !isempty(Kaimon.KaimonGate._STREAM_ENDPOINT[])
-    @test startswith(Kaimon.KaimonGate._STREAM_ENDPOINT[], "tcp://")
+    @test !isempty(Kaimon.KaimonGate._stream_endpoint())
+    @test startswith(Kaimon.KaimonGate._stream_endpoint(), "tcp://")
 
     ctx = Context()
     req = Socket(ctx, REQ)
@@ -355,7 +358,7 @@ end
     end
 
     @test !Kaimon.KaimonGate._running()
-    @test isempty(Kaimon.KaimonGate._AUTH_TOKEN[])
+    @test isempty(Kaimon.KaimonGate._auth_token())
 end
 
 # ─────────────────────────────────────────────────────────────────────────────

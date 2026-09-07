@@ -16,10 +16,8 @@ function with_gate_state(f;
     running=nothing, stream_endpoint=nothing
 )
     KG = KaimonGate
-    orig_session  = KG._SESSION[]
-    orig_token    = KG._AUTH_TOKEN[]
-    orig_tools    = KG._SESSION_TOOLS[]
-    orig_endpoint = KG._STREAM_ENDPOINT[]
+    orig_session = KG._SESSION[]
+    orig_tools   = KG._SESSION_TOOLS[]
     try
         KG._SESSION[] = KG.GateSession(;
             mode            = something(mode, :ipc),
@@ -28,15 +26,13 @@ function with_gate_state(f;
             running         = something(running, false),
             stream_endpoint = something(stream_endpoint, ""),
         )
-        token           !== nothing && (KG._AUTH_TOKEN[]      = token)
-        tools           !== nothing && (KG._SESSION_TOOLS[]   = tools)
-        stream_endpoint !== nothing && (KG._STREAM_ENDPOINT[] = stream_endpoint)
+        # _SESSION_TOOLS is the last Ref still read here; the rest are session fields the
+        # constructor above sets and dropping the session puts back.
+        tools !== nothing && (KG._SESSION_TOOLS[] = tools)
         f()
     finally
-        KG._SESSION[]         = orig_session
-        KG._AUTH_TOKEN[]      = orig_token
-        KG._SESSION_TOOLS[]   = orig_tools
-        KG._STREAM_ENDPOINT[] = orig_endpoint
+        KG._SESSION[]       = orig_session
+        KG._SESSION_TOOLS[] = orig_tools
     end
 end
 

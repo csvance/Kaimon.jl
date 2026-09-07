@@ -190,7 +190,6 @@ const _GATE_TASK = Ref{Union{Task,Nothing}}(nothing)
 const _GATE_CONTEXT = Ref{Union{ZMQ.Context,Nothing}}(nothing)
 const _GATE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 const _STREAM_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)  # PUB for streaming output
-const _STREAM_ENDPOINT = Ref{String}("")                       # resolved PUB endpoint
 const _REVISE_WATCHER_TASK = Ref{Union{Task,Nothing}}(nothing)
 const _ORIGINAL_ARGV = Ref{Vector{String}}(String[])
 # Whether this platform lacks a ZMQ IPC transport (Windows). When true, `serve`
@@ -198,15 +197,6 @@ const _ORIGINAL_ARGV = Ref{Vector{String}}(String[])
 # file discovery. Defaults to the compile-time platform; tests override it to exercise
 # the Windows coerce-and-advertise path on a POSIX host.
 const _NO_IPC_TRANSPORT = Ref{Bool}(Sys.iswindows())
-# True when the current gate is TCP only because a requested :ipc gate was coerced
-# (Windows) — i.e. a LOCAL, file-discoverable gate, not an explicit remote one. Restart
-# keys off this: a coerced gate must restart as :ipc (re-coerce + re-advertise), whereas
-# an explicit remote gate replays its mode/host/port to rebind the same endpoint.
-const _LOCAL_TCP_COERCED = Ref{Bool}(false)
-const _TCP_HOST = Ref{String}("127.0.0.1")
-const _TCP_PORT = Ref{Int}(0)          # actual bound port (resolved from ephemeral)
-const _TCP_STREAM_PORT = Ref{Int}(0)   # actual bound PUB port
-const _AUTH_TOKEN = Ref{String}("")  # non-empty = require token on TCP requests
 const _GATE_TTY_PATH = Ref{Union{String,Nothing}}(nothing)
 const _GATE_TTY_SIZE =
     Ref{Union{Nothing,NamedTuple{(:rows, :cols),Tuple{Int,Int}}}}(nothing)

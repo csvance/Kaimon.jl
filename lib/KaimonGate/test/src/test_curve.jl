@@ -342,7 +342,7 @@ end
                 @test length(spub) == 40
 
                 rep_endpoint = rstrip(ZMQ._get_last_endpoint(KG._GATE_SOCKET[]), '\0')
-                pub_endpoint = KG._STREAM_ENDPOINT[]
+                pub_endpoint = KG._stream_endpoint()
                 ctx = ZMQ.Context()
 
                 # CURVE client (correct server key, ephemeral client key) → pong

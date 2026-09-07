@@ -42,7 +42,11 @@ mutable struct GateSession
     tcp_port::Int                   # RESOLVED port, not the requested one: a gate asked for
     tcp_stream_port::Int            # port 0 must rebind to the port it actually got
     auth_token::String              # non-empty ⇒ require a token on TCP requests
-    local_tcp_coerced::Bool         # TCP only because :ipc was coerced (Windows)
+    # TCP only because a requested :ipc gate was coerced (Windows) — a LOCAL,
+    # file-discoverable gate rather than an explicit remote one. Restart keys off this: a
+    # coerced gate must come back as :ipc so it re-coerces and re-advertises, whereas an
+    # explicit remote gate replays its mode/host/port to rebind the same endpoint.
+    local_tcp_coerced::Bool
     allow_mirror::Bool
     allow_restart::Bool
     mirror_repl::Bool

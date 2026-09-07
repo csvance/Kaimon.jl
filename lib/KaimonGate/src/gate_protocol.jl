@@ -346,9 +346,9 @@ end
 
 function handle_message(request::NamedTuple)
     # TCP auth: reject unauthenticated requests when a token is set
-    if _mode() == :tcp && !isempty(_AUTH_TOKEN[])
+    if _mode() == :tcp && !isempty(_auth_token())
         token = get(request, :token, "")
-        if token != _AUTH_TOKEN[]
+        if token != _auth_token()
             return (type = :error, message = "Authentication required")
         end
     end
@@ -443,7 +443,7 @@ function handle_message(request::NamedTuple)
             allow_restart = _allow_restart(),
             allow_mirror = _allow_mirror(),
             mirror_repl = _mirror_repl(),
-            stream_endpoint = _STREAM_ENDPOINT[],
+            stream_endpoint = _stream_endpoint(),
             server_pubkey = _CURVE_SERVER_PUBLIC[],
         )
     elseif msg_type == :tool_call
