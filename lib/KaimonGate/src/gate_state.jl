@@ -191,14 +191,8 @@ const _GATE_CONTEXT = Ref{Union{ZMQ.Context,Nothing}}(nothing)
 const _GATE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 const _STREAM_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)  # PUB for streaming output
 const _STREAM_ENDPOINT = Ref{String}("")                       # resolved PUB endpoint
-const _SESSION_ID = Ref{String}("")
-const _MIRROR_REPL = Ref{Bool}(false)
-const _ALLOW_MIRROR = Ref{Bool}(true)
 const _REVISE_WATCHER_TASK = Ref{Union{Task,Nothing}}(nothing)
-const _SESSION_NAMESPACE = Ref{String}("")
-const _ALLOW_RESTART = Ref{Bool}(true)
 const _ORIGINAL_ARGV = Ref{Vector{String}}(String[])
-const _MODE = Ref{Symbol}(:ipc)
 # Whether this platform lacks a ZMQ IPC transport (Windows). When true, `serve`
 # coerces a requested `:ipc` gate to a local TCP bind and still advertises it for
 # file discovery. Defaults to the compile-time platform; tests override it to exercise

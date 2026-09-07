@@ -609,7 +609,7 @@ end
                               tools = [KG.GateTool("noop", a -> "ok")])
                     sleep(0.3)
 
-                    @test KG._MODE[] == :tcp                    # coerced IPC → TCP
+                    @test KG._mode() == :tcp                    # coerced IPC → TCP
                     @test KG._LOCAL_TCP_COERCED[]               # flagged local (so restart re-coerces, not pins :tcp)
 
                     # The fix: it advertised discovery metadata despite being TCP.

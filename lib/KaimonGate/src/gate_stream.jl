@@ -547,7 +547,7 @@ function _sink_emit_line!(sink::_EvalSink, kind::Symbol, line::String, orig::IO)
             write(orig, line)
             flush(orig)
         catch e
-            e isa Base.IOError && (_MIRROR_REPL[] = false)
+            e isa Base.IOError && (_mirror_repl!(false))
         end
     end
     _publish_stream(kind === :stderr ? "stderr" : "stdout", line; request_id = sink.request_id)

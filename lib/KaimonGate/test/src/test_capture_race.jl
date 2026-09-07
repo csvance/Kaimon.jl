@@ -21,9 +21,8 @@ _capture(code::AbstractString) =
     KaimonGate._eval_with_capture(Base.parse_input_line(code))
 
 @testset "KaimonGate._eval_with_capture stdout completeness" begin
-    # Never mirror to the test process's real stdout.
-    orig_mirror = KaimonGate._MIRROR_REPL[]
-    KaimonGate._MIRROR_REPL[] = false
+    # Never mirror to the test process's real stdout. Mirroring is a session field and there
+    # is no session here, so it already reads false — nothing to set or restore.
     try
         N = 300
 
@@ -65,7 +64,6 @@ _capture(code::AbstractString) =
             @test miss == 0
         end
     finally
-        KaimonGate._MIRROR_REPL[] = orig_mirror
         KaimonGate._restore_capture!()   # don't leave Base.stdout rebound for later test files
     end
 end

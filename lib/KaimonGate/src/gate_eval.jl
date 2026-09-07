@@ -10,7 +10,7 @@ function _mirror_print(f::Function)
     try
         f()
     catch e
-        e isa Base.IOError && (_MIRROR_REPL[] = false)
+        e isa Base.IOError && (_mirror_repl!(false))
     end
 end
 
@@ -26,7 +26,7 @@ function gate_eval(code::String; _mod::Module = Main, display_code::String = cod
     queued = _EVAL_QUEUED[]                  # evals still waiting for a slot
     # Only the PRIMARY eval mirrors to the terminal (header + live output);
     # concurrent evals run headless (captured + streamed to Activity + returned).
-    mirror_owned = _MIRROR_REPL[] && _claim_mirror!()
+    mirror_owned = _mirror_repl() && _claim_mirror!()
     try
         if mirror_owned
             _mirror_print() do
@@ -85,7 +85,7 @@ function gate_eval(code::String; _mod::Module = Main, display_code::String = cod
 end
 
 function _maybe_echo_result(result)
-    _MIRROR_REPL[] || return
+    _mirror_repl() || return
 
     has_exc = hasproperty(result, :exception) && result.exception !== nothing
     if has_exc
@@ -105,17 +105,17 @@ end
 
 function _set_option!(key::String, value)
     if key == "mirror_repl"
-        if value === true && !_ALLOW_MIRROR[]
+        if value === true && !_allow_mirror()
             return (type = :ok, key = key, value = false)
         end
-        _MIRROR_REPL[] = value === true
-        return (type = :ok, key = key, value = _MIRROR_REPL[])
+        _mirror_repl!(value === true)
+        return (type = :ok, key = key, value = _mirror_repl())
     end
     return (type = :error, message = "unknown option: $key")
 end
 
 function _current_options()
-    return (type = :options, mirror_repl = _MIRROR_REPL[], allow_mirror = _ALLOW_MIRROR[])
+    return (type = :options, mirror_repl = _mirror_repl(), allow_mirror = _allow_mirror())
 end
 
 """

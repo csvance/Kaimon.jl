@@ -17,8 +17,8 @@ _cap(code::AbstractString) =
     KaimonGate._eval_with_capture(Base.parse_input_line(code))
 
 @testset "concurrent capture isolation" begin
-    orig_mirror = KaimonGate._MIRROR_REPL[]
-    KaimonGate._MIRROR_REPL[] = false   # never echo to the test process's stdout
+    # Mirroring is a session field and there is no session here, so it already reads false
+    # and nothing echoes to the test process's stdout.
     try
         N = 200
         results = Vector{Any}(undef, N)
@@ -43,7 +43,6 @@ _cap(code::AbstractString) =
         @test count(x -> !x.iso, results) == 0    # no cross-talk / loss
         @test count(x -> !x.valok, results) == 0  # correct per-eval values
     finally
-        KaimonGate._MIRROR_REPL[] = orig_mirror
         KaimonGate._restore_capture!()   # don't leave Base.stdout rebound for later test files
     end
 end

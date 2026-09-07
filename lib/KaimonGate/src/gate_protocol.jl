@@ -346,7 +346,7 @@ end
 
 function handle_message(request::NamedTuple)
     # TCP auth: reject unauthenticated requests when a token is set
-    if _MODE[] == :tcp && !isempty(_AUTH_TOKEN[])
+    if _mode() == :tcp && !isempty(_AUTH_TOKEN[])
         token = get(request, :token, "")
         if token != _AUTH_TOKEN[]
             return (type = :error, message = "Authentication required")
@@ -439,10 +439,10 @@ function handle_message(request::NamedTuple)
             project_path = dirname(Base.active_project()),
             label = get(ENV, "KAIMON_SESSION_LABEL", ""),   # client-provided display label (e.g. a notebook filename)
             tools = [_reflect_tool(t) for t in _SESSION_TOOLS[]],
-            namespace = _SESSION_NAMESPACE[],
-            allow_restart = _ALLOW_RESTART[],
-            allow_mirror = _ALLOW_MIRROR[],
-            mirror_repl = _MIRROR_REPL[],
+            namespace = _session_namespace(),
+            allow_restart = _allow_restart(),
+            allow_mirror = _allow_mirror(),
+            mirror_repl = _mirror_repl(),
             stream_endpoint = _STREAM_ENDPOINT[],
             server_pubkey = _CURVE_SERVER_PUBLIC[],
         )
@@ -545,7 +545,7 @@ function handle_message(request::NamedTuple)
     elseif msg_type == :restart
         # Save metadata before cleanup
         old_name = string(get(request, :name, "julia"))
-        old_session_id = _SESSION_ID[]
+        old_session_id = _session_id()
         old_project = dirname(Base.active_project())
         # Taken before the _cleanup below, which resets the fields the replay needs.
         old_session = _SESSION[]

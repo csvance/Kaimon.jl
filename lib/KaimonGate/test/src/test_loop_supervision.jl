@@ -108,14 +108,14 @@ end
     if KG._running() || Sys.iswindows()
         @test_skip true
     else
-        saved = (KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._MODE[], KG._SESSION_ID[])
+        saved = (KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._SESSION[])
         ctx = ZMQ.Context()
         sid = "test-rebind-$(bytes2hex(rand(UInt8, 4)))"
         path = joinpath(KG.sock_dir(), "$sid.sock")
         try
             KG._GATE_CONTEXT[] = ctx
-            KG._MODE[] = :ipc
-            KG._SESSION_ID[] = sid
+            # _ensure_router! rebuilds the endpoint from the session's mode and id.
+            KG._SESSION[] = KG.GateSession(; running = true, mode = :ipc, id = sid)
             s = KG._zmq_socket(ctx, ZMQ.ROUTER)
             KG._configure_router_socket!(s; curve = false, allow_any = false)
             ZMQ.bind(s, "ipc://$path")
@@ -147,7 +147,7 @@ end
             close(d)
             close(s2)
         finally
-            KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._MODE[], KG._SESSION_ID[] = saved
+            KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._SESSION[] = saved
             try; close(ctx); catch; end
             rm(path; force = true)
         end

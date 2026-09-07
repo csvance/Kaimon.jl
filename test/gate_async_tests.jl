@@ -127,7 +127,7 @@ end
 
     if was_running
         orig_tools = copy(Kaimon.KaimonGate._SESSION_TOOLS[])
-        session_id = Kaimon.KaimonGate._SESSION_ID[]
+        session_id = Kaimon.KaimonGate._session_id()
         Kaimon.KaimonGate._SESSION_TOOLS[] = vcat(orig_tools, [tool])
         # No sleep needed — sockets are already bound
     else
@@ -217,28 +217,27 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 @testset "Gate TCP auth" begin
-    orig_mode = Kaimon.KaimonGate._MODE[]
     orig_token = Kaimon.KaimonGate._AUTH_TOKEN[]
     # handle_message counts every message against the session, so it needs one to exist.
     orig_session = Kaimon.KaimonGate._SESSION[]
     Kaimon.KaimonGate._SESSION[] = Kaimon.KaimonGate.GateSession(; running = true)
 
     @testset "IPC mode skips auth" begin
-        Kaimon.KaimonGate._MODE[] = :ipc
+        Kaimon.KaimonGate._mode!(:ipc)
         Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :pong
     end
 
     @testset "TCP mode with empty token skips auth" begin
-        Kaimon.KaimonGate._MODE[] = :tcp
+        Kaimon.KaimonGate._mode!(:tcp)
         Kaimon.KaimonGate._AUTH_TOKEN[] = ""
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :pong
     end
 
     @testset "TCP mode rejects missing token" begin
-        Kaimon.KaimonGate._MODE[] = :tcp
+        Kaimon.KaimonGate._mode!(:tcp)
         Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
         @test resp.type == :error
@@ -246,7 +245,7 @@ end
     end
 
     @testset "TCP mode rejects wrong token" begin
-        Kaimon.KaimonGate._MODE[] = :tcp
+        Kaimon.KaimonGate._mode!(:tcp)
         Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
         resp = Kaimon.KaimonGate.handle_message((type = :ping, token = "wrong"))
         @test resp.type == :error
@@ -254,14 +253,14 @@ end
     end
 
     @testset "TCP mode accepts correct token" begin
-        Kaimon.KaimonGate._MODE[] = :tcp
+        Kaimon.KaimonGate._mode!(:tcp)
         Kaimon.KaimonGate._AUTH_TOKEN[] = "secret123"
         resp = Kaimon.KaimonGate.handle_message((type = :ping, token = "secret123"))
         @test resp.type == :pong
     end
 
     @testset "pong includes stream_endpoint" begin
-        Kaimon.KaimonGate._MODE[] = :ipc
+        Kaimon.KaimonGate._mode!(:ipc)
         Kaimon.KaimonGate._AUTH_TOKEN[] = ""
         Kaimon.KaimonGate._STREAM_ENDPOINT[] = "ipc:///tmp/test-stream.sock"
         resp = Kaimon.KaimonGate.handle_message((type = :ping,))
@@ -270,7 +269,7 @@ end
         Kaimon.KaimonGate._STREAM_ENDPOINT[] = ""
     end
 
-    Kaimon.KaimonGate._MODE[] = orig_mode
+    # mode rides on the session, so restoring that restores it too.
     Kaimon.KaimonGate._AUTH_TOKEN[] = orig_token
     Kaimon.KaimonGate._SESSION[] = orig_session
 end
@@ -301,7 +300,7 @@ end
     sleep(0.2)
 
     @test Kaimon.KaimonGate._running()
-    @test Kaimon.KaimonGate._MODE[] == :tcp
+    @test Kaimon.KaimonGate._mode() == :tcp
 
     sock = Kaimon.KaimonGate._GATE_SOCKET[]
     @test sock !== nothing
@@ -428,8 +427,9 @@ end
 
 @testset "Gate.restart guards" begin
     KG = Kaimon.KaimonGate
+    # Both guards read the session. Setting allow_restart anywhere else would let restart()
+    # through, and it does not throw on the way out — it execs this process.
     orig_session = KG._SESSION[]
-    orig_restart = KG._ALLOW_RESTART[]
 
     @testset "errors when gate is not running" begin
         KG._SESSION[] = nothing          # no session at all ⇒ not running
@@ -437,13 +437,11 @@ end
     end
 
     @testset "errors when restart is disabled" begin
-        KG._SESSION[] = KG.GateSession(; running = true)
-        KG._ALLOW_RESTART[] = false
+        KG._SESSION[] = KG.GateSession(; running = true, allow_restart = false)
         @test_throws ErrorException("Restart is disabled for this session (allow_restart=false)") KG.restart()
     end
 
     KG._SESSION[] = orig_session
-    KG._ALLOW_RESTART[] = orig_restart
 end
 
 # NOTE: handle_message(:restart) is not unit-tested here because the handler

@@ -20,24 +20,18 @@ const KG = Kaimon.KaimonGate
 and restore every touched global afterwards. No socket is bound: `_serve`'s merge branch
 returns before any transport work, so the flag is all the branch needs."""
 function with_running_gate(f, tools; namespace = "incumbent_ns")
-    saved = (
-        session = KG._SESSION[],
-        tools = KG._SESSION_TOOLS[],
-        ns = KG._SESSION_NAMESPACE[],
-        sid = KG._SESSION_ID[],
-    )
+    # namespace and id are session fields now, so the constructor sets them and putting the
+    # old session back restores them. Setting them afterwards would throw when there was no
+    # session to begin with.
+    saved = (session = KG._SESSION[], tools = KG._SESSION_TOOLS[])
     KG._SESSION[] = KG.GateSession(;
         running = true, tools = tools, namespace = namespace, id = "test-session")
     KG._SESSION_TOOLS[] = tools
-    KG._SESSION_NAMESPACE[] = namespace
-    KG._SESSION_ID[] = "test-session"
     try
         f()
     finally
         KG._SESSION[] = saved.session
         KG._SESSION_TOOLS[] = saved.tools
-        KG._SESSION_NAMESPACE[] = saved.ns
-        KG._SESSION_ID[] = saved.sid
     end
 end
 
@@ -138,7 +132,7 @@ end
             # The caller named no namespace, so `_serve` derived one from the active
             # project. Adopting it would rename every incumbent tool at the MCP layer on
             # behalf of a caller that never asked.
-            @test KG._SESSION_NAMESPACE[] == "incumbent_ns"
+            @test KG._session_namespace() == "incumbent_ns"
         end
     end
 
@@ -146,7 +140,7 @@ end
         with_running_gate([KG.GateTool("host_a", () -> "a")]; namespace = "incumbent_ns") do
             KG.serve(force = true, tools = [KG.GateTool("ext_x", () -> "x")],
                      namespace = "chosen_ns")
-            @test KG._SESSION_NAMESPACE[] == "chosen_ns"
+            @test KG._session_namespace() == "chosen_ns"
         end
     end
 

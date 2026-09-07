@@ -235,7 +235,7 @@ function _serve(;
     end
 
     if _running()
-        if session_id !== nothing && session_id != _SESSION_ID[]
+        if session_id !== nothing && session_id != _session_id()
             # Restart with a specific session_id (e.g. _exec_restart) —
             # stop the gate started by startup.jl and continue below
             # to rebind with the requested session_id.
@@ -281,30 +281,28 @@ function _serve(;
             # Only an EXPLICIT namespace re-labels a running gate. An auto-derived one says
             # nothing the gate does not already know, and adopting it would rename every
             # incumbent tool at the MCP layer on behalf of a caller that never asked.
-            namespace_given && (_SESSION_NAMESPACE[] = namespace)
+            namespace_given && (_session_namespace!(namespace))
             if !allow_mirror
-                _ALLOW_MIRROR[] = false
-                _MIRROR_REPL[] = false
+                _allow_mirror!(false)
+                _mirror_repl!(false)
             end
             @info "Registered $(length(tools)) tool(s) on running gate ($added new, \
-                   $(length(merged)) total; session=$(_SESSION_ID[]))"
-            return _SESSION_ID[]
+                   $(length(merged)) total; session=$(_session_id()))"
+            return _session_id()
         else
             # Same session already running (e.g. startup.jl created the gate,
             # then our injected -e fallback fires).  Update mutable options so
             # allow_mirror / allow_restart from the original session are
             # restored; namespace is auto-derived so it will match already.
-            _ALLOW_MIRROR[] = allow_mirror
-            _ALLOW_RESTART[] = allow_restart
-            return _SESSION_ID[]
+            _allow_mirror!(allow_mirror)
+            _allow_restart!(allow_restart)
+            return _session_id()
         end
     end
 
-    # Store session tools and namespace
+    # namespace / allow_mirror / allow_restart are already locals here and go straight into
+    # the session below; only the fields whose call sites have not migrated keep a Ref.
     _SESSION_TOOLS[] = tools
-    _SESSION_NAMESPACE[] = namespace
-    _ALLOW_MIRROR[] = allow_mirror
-    _ALLOW_RESTART[] = allow_restart
     _ON_SHUTDOWN[] = on_shutdown
 
     # Ensure socket directory exists
@@ -312,12 +310,11 @@ function _serve(;
 
     # Generate or reuse session ID
     sid = session_id !== nothing ? session_id : string(Base.UUID(rand(UInt128)))
-    _SESSION_ID[] = sid
     # Checked here rather than at each bind so an over-long cache dir fails before
     # any socket exists, not between the two. Mode is already Windows-coerced.
     mode === :ipc && _check_ipc_path_length(sid)
     start_time = time()
-    _MIRROR_REPL[] = if allow_mirror
+    mirror_repl = if allow_mirror
         try
             _MIRROR_PREF_PROVIDER[]()
         catch
@@ -340,7 +337,6 @@ function _serve(;
     socket = _zmq_socket(ctx, ROUTER)
     _GATE_CONTEXT[] = ctx
     _GATE_SOCKET[] = socket
-    _MODE[] = mode
 
     # Set auth token for TCP mode.
     # Priority: KAIMON_GATE_TOKEN env var > host-provided token > none.
@@ -466,11 +462,11 @@ function _serve(;
     # migrating onto it field by field; until they all have, the module Refs are kept in step
     # and remain the source of truth.
     _SESSION[] = GateSession(;
-        id = _SESSION_ID[], namespace = _SESSION_NAMESPACE[], mode = _MODE[],
+        id = sid, namespace = namespace, mode = mode,
         tcp_host = _TCP_HOST[], tcp_port = _TCP_PORT[],
         tcp_stream_port = _TCP_STREAM_PORT[], auth_token = _AUTH_TOKEN[],
-        local_tcp_coerced = _LOCAL_TCP_COERCED[], allow_mirror = _ALLOW_MIRROR[],
-        allow_restart = _ALLOW_RESTART[], mirror_repl = _MIRROR_REPL[],
+        local_tcp_coerced = _LOCAL_TCP_COERCED[], allow_mirror = allow_mirror,
+        allow_restart = allow_restart, mirror_repl = mirror_repl,
         start_time = start_time,
         context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
         stream_socket = _STREAM_SOCKET[], stream_endpoint = _STREAM_ENDPOINT[],
@@ -614,7 +610,7 @@ function _serve(;
             printstyled("$(_CURVE_SERVER_PUBLIC[])\n"; color = :cyan)
         end
     end
-    if _MIRROR_REPL[]
+    if _mirror_repl()
         printstyled("  host REPL mirroring enabled\n"; color = :light_black)
     end
 
@@ -722,10 +718,10 @@ function _ensure_router!(sock::ZMQ.Socket)
     ctx === nothing && error("gate ZMQ context is gone; cannot rebind the ROUTER")
     new = _zmq_socket(ctx, ROUTER)
     _configure_router_socket!(new; curve = _CURVE_ENABLED[], allow_any = _CURVE_ALLOW_ANY[])
-    endpoint = if _MODE[] == :tcp
+    endpoint = if _mode() == :tcp
         "tcp://$(_TCP_HOST[]):$(_TCP_PORT[])"
     else
-        sock_path = joinpath(sock_dir(), "$(_SESSION_ID[]).sock")
+        sock_path = joinpath(sock_dir(), "$(_session_id()).sock")
         rm(sock_path; force = true)
         "ipc://$(sock_path)"
     end
@@ -780,8 +776,8 @@ same session key.
 """
 function restart()
     _running() || error("Gate is not running")
-    _ALLOW_RESTART[] || error("Restart is disabled for this session (allow_restart=false)")
-    sid  = _SESSION_ID[]
+    _allow_restart() || error("Restart is disabled for this session (allow_restart=false)")
+    sid  = _session_id()
     # The replay configuration has to be taken BEFORE teardown, because _cleanup resets the
     # very fields _exec_restart needs (mode, host, port, namespace, the allow_* flags). Holding
     # the session keeps them: _cleanup nils _SESSION, but this reference stays live.
@@ -850,7 +846,7 @@ function _cleanup()
     # TCP mode: must close explicitly so the port is released immediately. Without
     # this, restarting a TCP gate on the same port fails until GC runs. This is safe
     # because TCP stop is user-initiated (not atexit).
-    if _MODE[] == :tcp
+    if _mode() == :tcp
         for sock in (_GATE_SOCKET, _STREAM_SOCKET, _SERVICE_SOCKET, _ZAP_SOCKET)
             s = sock[]
             if s !== nothing
@@ -894,18 +890,13 @@ function _cleanup()
     _GATE_CONTEXT[] = nothing
 
     # Remove files
-    cleanup_files(_SESSION_ID[])
+    cleanup_files(_session_id())
 
     _GATE_TASK[] = nothing
     _running!(false)
     _restarting!(false)
     _shutting_down!(false)
-    _MIRROR_REPL[] = false
-    _ALLOW_MIRROR[] = true
-    _ALLOW_RESTART[] = true
     _SESSION_TOOLS[] = GateTool[]
-    _SESSION_NAMESPACE[] = ""
-    _MODE[] = :ipc
     _LOCAL_TCP_COERCED[] = false
     _ON_SHUTDOWN[] = nothing
 
@@ -928,17 +919,17 @@ function status()
         sock = _GATE_SOCKET[]
         rep_ep = sock !== nothing ? rstrip(ZMQ._get_last_endpoint(sock), '\0') : "unknown"
         println("Gate: running")
-        println("  Session:   $(_SESSION_ID[])")
-        println("  Namespace: $(_SESSION_NAMESPACE[])")
+        println("  Session:   $(_session_id())")
+        println("  Namespace: $(_session_namespace())")
         println("  Uptime:    $(mins)m")
         println("  PID:       $(getpid())")
         println("  ROUTER:    $rep_ep")
         println("  PUB:       $(_STREAM_ENDPOINT[])")
-        println("  Mirror:    $(_MIRROR_REPL[])")
+        println("  Mirror:    $(_mirror_repl())")
         println("  Tools:     $(length(_SESSION_TOOLS[]))")
         println("  Pings:     $(_ping_count())$(  _last_ping_time() > 0 ? " (last $(round(Int, time() - _last_ping_time()))s ago)" : "")")
         println("  Messages:  $(_msg_count())")
-        if _MODE[] == :tcp
+        if _mode() == :tcp
             auth = isempty(_AUTH_TOKEN[]) ? "none (lax)" : "token"
             println("  Auth:      $auth")
         end

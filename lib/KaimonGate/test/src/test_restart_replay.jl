@@ -1,7 +1,7 @@
 # Restart replay: which serve() kwargs a gate reconstructs when it restarts itself.
 #
 # The subtle case is Windows. There a requested :ipc gate is COERCED to a local TCP bind,
-# so _MODE[] is :tcp — but on restart it must NOT pin mode=:tcp (that would make the
+# so the session's mode is :tcp — but on restart it must NOT pin mode=:tcp (that would make the
 # restarted _serve treat it as an explicit remote gate, skip discovery metadata, and orphan
 # the session). It must restart as a plain :ipc gate so it re-coerces and re-advertises.
 # An EXPLICIT remote TCP gate, by contrast, must replay mode/host/port to rebind the same

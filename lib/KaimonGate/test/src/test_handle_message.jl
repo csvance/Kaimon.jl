@@ -17,7 +17,6 @@ function with_gate_state(f;
 )
     KG = KaimonGate
     orig_session  = KG._SESSION[]
-    orig_mode     = KG._MODE[]
     orig_token    = KG._AUTH_TOKEN[]
     orig_tools    = KG._SESSION_TOOLS[]
     orig_endpoint = KG._STREAM_ENDPOINT[]
@@ -29,14 +28,12 @@ function with_gate_state(f;
             running         = something(running, false),
             stream_endpoint = something(stream_endpoint, ""),
         )
-        mode            !== nothing && (KG._MODE[]            = mode)
         token           !== nothing && (KG._AUTH_TOKEN[]      = token)
         tools           !== nothing && (KG._SESSION_TOOLS[]   = tools)
         stream_endpoint !== nothing && (KG._STREAM_ENDPOINT[] = stream_endpoint)
         f()
     finally
         KG._SESSION[]         = orig_session
-        KG._MODE[]            = orig_mode
         KG._AUTH_TOKEN[]      = orig_token
         KG._SESSION_TOOLS[]   = orig_tools
         KG._STREAM_ENDPOINT[] = orig_endpoint
@@ -199,17 +196,17 @@ end
 # Adapted from Kaimon gate_async_tests "Gate.restart guards"
 
 @testset "restart() guards" begin
+    # Both guards read the session now. Setting allow_restart anywhere else would let
+    # restart() through, and it does not throw on the way out — it execs.
     orig_session = KaimonGate._SESSION[]
-    orig_restart = KaimonGate._ALLOW_RESTART[]
     try
         KaimonGate._SESSION[] = nothing          # no session at all ⇒ not running
         @test_throws ErrorException KaimonGate.restart()
 
-        KaimonGate._SESSION[] = KaimonGate.GateSession(; running = true)
-        KaimonGate._ALLOW_RESTART[] = false
+        KaimonGate._SESSION[] =
+            KaimonGate.GateSession(; running = true, allow_restart = false)
         @test_throws ErrorException KaimonGate.restart()
     finally
-        KaimonGate._SESSION[]       = orig_session
-        KaimonGate._ALLOW_RESTART[] = orig_restart
+        KaimonGate._SESSION[] = orig_session
     end
 end

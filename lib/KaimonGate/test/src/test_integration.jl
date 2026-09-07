@@ -159,7 +159,7 @@ end
     sleep(0.2)
 
     @test KaimonGate._running()
-    @test KaimonGate._MODE[] == :tcp
+    @test KaimonGate._mode() == :tcp
     sock = KaimonGate._GATE_SOCKET[]
     @test sock !== nothing
     rep_endpoint = rstrip(ZMQ._get_last_endpoint(sock), '\0')
