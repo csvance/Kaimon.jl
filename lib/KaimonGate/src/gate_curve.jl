@@ -25,11 +25,9 @@ const _ZMQ_ZAP_DOMAIN      = 55
 const _ZAP_ENDPOINT = "inproc://zeromq.zap.01"
 const _ZAP_DOMAIN   = "kaimon"
 
-# The CURVE keypair and flags are session fields (see GateSession). The ZAP handles stay
-# module-level: `serve` must start the handler BEFORE any CURVE socket binds, which is before
-# it has resolved enough to build the session.
-const _ZAP_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
-const _ZAP_TASK   = Ref{Union{Task,Nothing}}(nothing)
+# The CURVE keypair, flags and ZAP handles are all session fields (see GateSession).
+# `_start_zap_handler!` hands its socket and task back to `serve` rather than registering
+# them, because it must run before there is a session to register them on.
 
 # ── Low-level setsockopt helpers ──────────────────────────────────────────────
 
@@ -420,28 +418,28 @@ so `authorize_client!`/`revoke_client!` take effect live — no gate restart. No
 ZAP only gates *new* handshakes: a revoked client that is already connected stays
 connected until it (re)connects (ZMQ exposes no per-peer disconnect).
 
-Must be started BEFORE the CURVE-server sockets bind.
+Must be started BEFORE the CURVE-server sockets bind. Returns `(socket, task)` for the caller
+to hold — this runs earlier than `serve` can build a session, so the handler owns nothing
+global and is stopped by closing the socket it was handed.
 """
 function _start_zap_handler!(ctx::ZMQ.Context; allow_any::Bool=false)
     zap = _zmq_socket(ctx, ZMQ.REP)
     ZMQ.bind(zap, _ZAP_ENDPOINT)
     zap.rcvtimeo = 250
     zap.linger = 0
-    _ZAP_SOCKET[] = zap
-    _ZAP_TASK[] = Threads.@spawn :interactive begin
+    task = Threads.@spawn :interactive begin
         try
-            # Run until the socket this task owns is retired — `stop`/`_cleanup` nil it, and
-            # nothing else binds this endpoint. Keying on `_running()` instead was a race: the
-            # handler must start BEFORE the CURVE sockets bind, but `serve` does not set that
-            # flag until much later and yields in between, so a handler scheduled in the gap
-            # fell straight through to the `finally` below and closed its own socket. The
-            # gate then bound its CURVE sockets with no authenticator behind them.
-            while _ZAP_SOCKET[] === zap
+            # Run until this socket is closed, which is the only thing that ends the handler.
+            # Earlier versions keyed the loop on a module flag `serve` had not set yet: the
+            # handler must start BEFORE the CURVE sockets bind, so one scheduled in that gap
+            # saw the flag false, fell through to the `finally` and closed the socket it had
+            # just bound, leaving the gate to bind its CURVE sockets with no authenticator.
+            while true
                 frames = try
                     ZMQ.recv_multipart(zap, Vector{UInt8})
                 catch e
-                    e isa ZMQ.TimeoutError && continue   # re-check ownership
-                    _ZAP_SOCKET[] === zap || break
+                    isopen(zap) || break                 # closed by teardown
+                    e isa ZMQ.TimeoutError && continue   # idle tick
                     @debug "ZAP recv error" exception = e
                     continue
                 end
@@ -456,11 +454,9 @@ function _start_zap_handler!(ctx::ZMQ.Context; allow_any::Bool=false)
             end
         finally
             try; close(zap); catch; end
-            # Only if it is still ours: a later handler may already have registered its own.
-            _ZAP_SOCKET[] === zap && (_ZAP_SOCKET[] = nothing)
         end
     end
-    return _ZAP_TASK[]
+    return (zap, task)
 end
 
 # ── Public subscriber helper (CURVE-aware) ─────────────────────────────────────

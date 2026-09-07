@@ -214,7 +214,7 @@ end
         withenv("XDG_CACHE_HOME" => dir) do
             KG.authorize_client!(good_pub)             # only this client is allowed
             ctx = ZMQ.Context()
-            KG._start_zap_handler!(ctx; allow_any = false)
+            zap, _ = KG._start_zap_handler!(ctx; allow_any = false)
             rep = ZMQ.Socket(ctx, ZMQ.REP); rep.rcvtimeo = 1000; rep.linger = 0
             KG.make_curve_server!(rep, ssec)
             KG._setsockopt_str(rep, KG._ZMQ_ZAP_DOMAIN, KG._ZAP_DOMAIN)  # consult ZAP
@@ -240,8 +240,8 @@ end
                 ZMQ.close(bad)
             finally
                 ZMQ.close(rep)
-                KG._ZAP_SOCKET[] = nothing     # retiring its socket is what stops the handler
-                sleep(0.4)                     # let it close its socket
+                ZMQ.close(zap)                 # closing its socket is what stops the handler
+                sleep(0.4)
                 ZMQ.close(ctx)
             end
         end
@@ -253,27 +253,25 @@ end
 # handler scheduled in that gap fell straight through to its `finally`, closed its own socket,
 # and left the gate to bind its CURVE sockets with no authenticator. It now runs until the
 # socket it owns is retired, so the flag's timing cannot reach it.
-@testset "ZAP handler outlives a start before the running flag" begin
+@testset "ZAP handler outlives a start with no session" begin
     mktempdir() do dir
         withenv("XDG_CACHE_HOME" => dir) do
-            prev_sock, prev_task = KG._ZAP_SOCKET[], KG._ZAP_TASK[]
             ctx = ZMQ.Context()
+            zap = nothing
             try
-                # No session at all, so the gate is as un-running as it gets — the window
-                # _serve leaves open, only wider.
-                task = KG._start_zap_handler!(ctx; allow_any = true)
+                # No session at all — a wider version of the window `serve` leaves open
+                # between starting the handler and having anything to register it on.
+                zap, task = KG._start_zap_handler!(ctx; allow_any = true)
                 for _ in 1:100                 # give the spawned task time to be scheduled
                     istaskdone(task) && break
                     sleep(0.01)
                 end
                 @test !istaskdone(task)
-                @test KG._ZAP_SOCKET[] !== nothing
+                @test isopen(zap)
             finally
-                KG._ZAP_SOCKET[] = nothing     # retiring its socket is what stops the handler
+                zap === nothing || (try; ZMQ.close(zap); catch; end)
                 sleep(0.4)
                 try; ZMQ.close(ctx); catch; end
-                KG._ZAP_SOCKET[] = prev_sock
-                KG._ZAP_TASK[]   = prev_task
             end
         end
     end
@@ -286,7 +284,7 @@ end
     mktempdir() do dir
         withenv("XDG_CACHE_HOME" => dir) do
             ctx = ZMQ.Context()
-            KG._start_zap_handler!(ctx; allow_any = false)   # empty allow-list at start
+            zap, _ = KG._start_zap_handler!(ctx; allow_any = false)  # empty allow-list at start
             rep = ZMQ.Socket(ctx, ZMQ.REP); rep.rcvtimeo = 1000; rep.linger = 0
             KG.make_curve_server!(rep, ssec)
             KG._setsockopt_str(rep, KG._ZMQ_ZAP_DOMAIN, KG._ZAP_DOMAIN)
@@ -319,7 +317,7 @@ end
                 ZMQ.close(r3)
             finally
                 ZMQ.close(rep)
-                KG._ZAP_SOCKET[] = nothing     # retiring its socket is what stops the handler
+                ZMQ.close(zap)                 # closing its socket is what stops the handler
                 sleep(0.4)
                 ZMQ.close(ctx)
             end

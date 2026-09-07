@@ -362,12 +362,15 @@ function _serve(;
     # empty authorized_clients list rejects everyone). Apply before bind.
     curve_on = mode == :tcp && curve
     curve_server_public, curve_server_secret = "", ""
+    zap_socket, zap_task = nothing, nothing
     if curve_on
         curve_server_public, curve_server_secret = _resolve_server_keypair(server_secret)
         for ck in allowed_clients
             isempty(ck) || authorize_client!(ck)
         end
-        allow_any || _start_zap_handler!(ctx; allow_any = false)
+        # Started before the session exists, so it hands its handles back for the session
+        # below to hold; closing that socket is what stops it.
+        allow_any || ((zap_socket, zap_task) = _start_zap_handler!(ctx; allow_any = false))
     end
     # Shared with _ensure_router!, so a supervisor rebind replays exactly this. The secret is
     # passed rather than read from the session: this runs before the session is built, and
@@ -471,7 +474,7 @@ function _serve(;
         curve_enabled = curve_on, curve_allow_any = allow_any,
         curve_server_secret = curve_server_secret,
         curve_server_public = curve_server_public,
-        zap_socket = _ZAP_SOCKET[], zap_task = _ZAP_TASK[],
+        zap_socket = zap_socket, zap_task = zap_task,
         on_shutdown = on_shutdown, tools = tools,
         running = true,
     )
@@ -848,7 +851,7 @@ function _cleanup()
     # this, restarting a TCP gate on the same port fails until GC runs. This is safe
     # because TCP stop is user-initiated (not atexit).
     if _mode() == :tcp
-        for s in (_gate_socket(), _stream_socket(), _ZAP_SOCKET[])
+        for s in (_gate_socket(), _stream_socket(), _zap_socket())
             s === nothing || (try; close(s); catch; end)
         end
         ctx = _gate_context()
@@ -870,8 +873,6 @@ function _cleanup()
         empty!(_ON_STREAM_UNSUBSCRIBE)
     end
 
-    _ZAP_SOCKET[] = nothing
-    _ZAP_TASK[] = nothing
 
     # Remove files
     cleanup_files(_session_id())
