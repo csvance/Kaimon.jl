@@ -307,9 +307,63 @@ function _source_docstring(f::Function)::String
         m = methods(f)
         isempty(m) && return ""
         file = string(first(m).file)
-        line = first(m).line
+        line = Int(first(m).line)
         isfile(file) || return ""
-        src = readlines(file)
+        st = stat(file)
+        stamp = (Float64(st.mtime), Int(st.size))
+        hit = lock(_SRC_LOCK) do
+            c = get(_DOC_CACHE, (file, line), nothing)
+            (c !== nothing && c[1] == stamp[1] && c[2] == stamp[2]) ? c[3] : nothing
+        end
+        hit === nothing || return hit
+        doc = _scan_docstring(_source_lines(file, stamp), line)
+        lock(_SRC_LOCK) do
+            _DOC_CACHE[(file, line)] = (stamp[1], stamp[2], doc)
+        end
+        return doc
+    catch
+    end
+    return ""
+end
+
+# Reflecting one tool means reading the whole file that defines it, and a client reflects EVERY tool
+# on every heartbeat ping. Uncached, a gate that is doing nothing re-reads that file once per tool
+# for as long as it runs, and the cost grows with each tool added.
+#
+# Two caches, both keyed by the file's mtime and size: the docstrings, so a warm gate reads nothing
+# at all, and the lines themselves, so the cold pass reads each file once instead of once per tool
+# (a session's tools are usually declared together in one file). Keying on the stamp is what keeps a
+# source edit visible, which matters because these files are edited live under Revise.
+#
+# The line cache holds one entry per file that DEFINES a tool, which is one or two in practice.
+const _SRC_CACHE = Dict{String,Tuple{Float64,Int,Vector{String}}}()
+const _DOC_CACHE = Dict{Tuple{String,Int},Tuple{Float64,Int,String}}()
+const _SRC_LOCK = ReentrantLock()
+
+function _source_lines(file::AbstractString, stamp::Tuple{Float64,Int})
+    lock(_SRC_LOCK) do
+        c = get(_SRC_CACHE, file, nothing)
+        (c !== nothing && c[1] == stamp[1] && c[2] == stamp[2]) && return c[3]
+        lines = readlines(file)
+        _SRC_CACHE[String(file)] = (stamp[1], stamp[2], lines)
+        return lines
+    end
+end
+
+"""Drop both source caches. For tests, and for anything that edits a file in place without moving
+its mtime or size."""
+function _clear_source_cache!()
+    lock(_SRC_LOCK) do
+        empty!(_SRC_CACHE)
+        empty!(_DOC_CACHE)
+        empty!(_REFLECT_CACHE)
+    end
+    return nothing
+end
+
+# The scan itself, unchanged: walk up from the definition line collecting a triple-quoted block.
+function _scan_docstring(src::Vector{String}, line::Int)::String
+    try
         # Scan backwards from the function definition line looking for \"\"\"...\"\"\".
         # Collect lines that are part of a triple-quoted block, stopping at the
         # first non-blank, non-closing-delimiter line that isn't a string.
@@ -479,8 +533,42 @@ end
 
 Reflect on a GateTool's handler to extract argument metadata and docstring.
 Returns a serializable Dict sent to the TUI via pong for MCP schema generation.
+
+Cached. The answer is derived entirely from the handler's method table and its source file, and it
+is recomputed for every tool on every heartbeat ping, which on a session with many tools is the bulk
+of what an idle gate does. The key covers both inputs: a re-registered tool is a different handler
+object, and an edited file has a different stamp.
 """
 function _reflect_tool(tool::GateTool)
+    key = _reflect_key(tool)
+    if key !== nothing
+        hit = lock(_SRC_LOCK) do; get(_REFLECT_CACHE, key, nothing); end
+        # Copied on the way out: the caller owns its dict and may add to it before serializing.
+        hit === nothing || return copy(hit)
+    end
+    meta = _reflect_tool_uncached(tool)
+    key === nothing || lock(_SRC_LOCK) do; _REFLECT_CACHE[key] = copy(meta); end
+    return meta
+end
+
+# (handler identity, source file, mtime, size). `nothing` when the handler has no source to stamp,
+# in which case reflection is cheap anyway and simply is not cached.
+const _REFLECT_CACHE = Dict{Tuple{String,UInt,String,Float64,Int},Dict{String,Any}}()
+
+function _reflect_key(tool::GateTool)
+    try
+        m = methods(tool.handler)
+        isempty(m) && return nothing
+        file = string(first(m).file)
+        isfile(file) || return nothing
+        st = stat(file)
+        return (tool.name, objectid(tool.handler), file, Float64(st.mtime), Int(st.size))
+    catch
+        return nothing
+    end
+end
+
+function _reflect_tool_uncached(tool::GateTool)
     f = tool.handler
     ms = methods(f)
 
