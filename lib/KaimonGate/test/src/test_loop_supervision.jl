@@ -117,7 +117,8 @@ end
             # _ensure_router! rebuilds the endpoint from the session's mode and id.
             KG._SESSION[] = KG.GateSession(; running = true, mode = :ipc, id = sid)
             s = KG._zmq_socket(ctx, ZMQ.ROUTER)
-            KG._configure_router_socket!(s; curve = false, allow_any = false)
+            KG._configure_router_socket!(s; curve = false, allow_any = false,
+                                         server_secret = "")
             ZMQ.bind(s, "ipc://$path")
             KG._GATE_SOCKET[] = s
 

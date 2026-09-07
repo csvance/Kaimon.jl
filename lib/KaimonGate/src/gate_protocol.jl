@@ -444,7 +444,7 @@ function handle_message(request::NamedTuple)
             allow_mirror = _allow_mirror(),
             mirror_repl = _mirror_repl(),
             stream_endpoint = _stream_endpoint(),
-            server_pubkey = _CURVE_SERVER_PUBLIC[],
+            server_pubkey = _curve_server_public(),
         )
     elseif msg_type == :tool_call
         tool_name = string(get(request, :name, ""))

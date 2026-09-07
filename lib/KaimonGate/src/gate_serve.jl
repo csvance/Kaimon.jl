@@ -364,19 +364,20 @@ function _serve(;
     # allow_any, also start a ZAP handler (one per context, covers PUB too) and
     # set ZAP_DOMAIN so libzmq enforces the client allow-list (fail-closed: an
     # empty authorized_clients list rejects everyone). Apply before bind.
-    if mode == :tcp && curve
-        spub, ssec = _resolve_server_keypair(server_secret)
-        _CURVE_SERVER_SECRET[] = ssec
-        _CURVE_SERVER_PUBLIC[] = spub
-        _CURVE_ENABLED[] = true
-        _CURVE_ALLOW_ANY[] = allow_any
+    curve_on = mode == :tcp && curve
+    curve_server_public, curve_server_secret = "", ""
+    if curve_on
+        curve_server_public, curve_server_secret = _resolve_server_keypair(server_secret)
         for ck in allowed_clients
             isempty(ck) || authorize_client!(ck)
         end
         allow_any || _start_zap_handler!(ctx; allow_any = false)
     end
-    # Shared with _ensure_router!, so a supervisor rebind replays exactly this.
-    _configure_router_socket!(socket; curve = mode == :tcp && curve, allow_any)
+    # Shared with _ensure_router!, so a supervisor rebind replays exactly this. The secret is
+    # passed rather than read from the session: this runs before the session is built, and
+    # the ZAP handler above must already be up before any CURVE socket binds.
+    _configure_router_socket!(socket; curve = curve_on, allow_any,
+                              server_secret = curve_server_secret)
 
     # Bind endpoint — IPC (local socket file) or TCP (network port)
     # TCP mode supports port=0 for ephemeral port assignment (ZMQ picks a free port).
@@ -417,9 +418,9 @@ function _serve(;
         _setsockopt_int(pub_socket, _ZMQ_TCP_KEEPALIVE_CNT, 3)
     end
     # CURVE: same server treatment as the REP socket (ZAP handler already running).
-    if mode == :tcp && curve
-        make_curve_server!(pub_socket, _CURVE_SERVER_SECRET[])
-        _CURVE_ALLOW_ANY[] || _setsockopt_str(pub_socket, _ZMQ_ZAP_DOMAIN, _ZAP_DOMAIN)
+    if curve_on
+        make_curve_server!(pub_socket, curve_server_secret)
+        allow_any || _setsockopt_str(pub_socket, _ZMQ_ZAP_DOMAIN, _ZAP_DOMAIN)
     end
     if mode == :tcp
         bind(pub_socket, "tcp://$(host):$(stream_port)")
@@ -472,9 +473,9 @@ function _serve(;
         start_time = start_time,
         context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
         stream_socket = _STREAM_SOCKET[], stream_endpoint = stream_endpoint,
-        curve_enabled = _CURVE_ENABLED[], curve_allow_any = _CURVE_ALLOW_ANY[],
-        curve_server_secret = _CURVE_SERVER_SECRET[],
-        curve_server_public = _CURVE_SERVER_PUBLIC[],
+        curve_enabled = curve_on, curve_allow_any = allow_any,
+        curve_server_secret = curve_server_secret,
+        curve_server_public = curve_server_public,
         zap_socket = _ZAP_SOCKET[], zap_task = _ZAP_TASK[],
         on_shutdown = _ON_SHUTDOWN[], tools = _SESSION_TOOLS[],
         running = true,
@@ -603,13 +604,13 @@ function _serve(;
             printstyled("  Auth: "; color = :light_black)
             printstyled("none (lax mode)\n"; color = :yellow)
         end
-        if _CURVE_ENABLED[]
+        if _curve_enabled()
             printstyled("  🔒 CURVE: "; color = :light_black)
             printstyled("on"; color = :green)
-            printstyled(_CURVE_ALLOW_ANY[] ? " (pin-only)" : " (allow-list)";
+            printstyled(_curve_allow_any() ? " (pin-only)" : " (allow-list)";
                         color = :light_black)
             printstyled("\n  Server key: "; color = :light_black)
-            printstyled("$(_CURVE_SERVER_PUBLIC[])\n"; color = :cyan)
+            printstyled("$(_curve_server_public())\n"; color = :cyan)
         end
     end
     if _mirror_repl()
@@ -693,11 +694,12 @@ it per iteration, see `_GATE_RCVTIMEO_BUSY`/`_IDLE`); `linger = 0` so `close()`
 does not block; the CURVE server role reuses the context-wide keypair and ZAP
 handler `serve` set up.
 """
-function _configure_router_socket!(socket::ZMQ.Socket; curve::Bool, allow_any::Bool)
+function _configure_router_socket!(socket::ZMQ.Socket; curve::Bool, allow_any::Bool,
+                                   server_secret::AbstractString)
     socket.rcvtimeo = _GATE_RCVTIMEO_IDLE[]
     socket.linger = 0
     if curve
-        make_curve_server!(socket, _CURVE_SERVER_SECRET[])
+        make_curve_server!(socket, server_secret)
         allow_any || _setsockopt_str(socket, _ZMQ_ZAP_DOMAIN, _ZAP_DOMAIN)
     end
     return socket
@@ -719,7 +721,8 @@ function _ensure_router!(sock::ZMQ.Socket)
     ctx = _GATE_CONTEXT[]
     ctx === nothing && error("gate ZMQ context is gone; cannot rebind the ROUTER")
     new = _zmq_socket(ctx, ROUTER)
-    _configure_router_socket!(new; curve = _CURVE_ENABLED[], allow_any = _CURVE_ALLOW_ANY[])
+    _configure_router_socket!(new; curve = _curve_enabled(), allow_any = _curve_allow_any(),
+                              server_secret = _curve_server_secret())
     endpoint = if _mode() == :tcp
         "tcp://$(_tcp_host()):$(_tcp_port())"
     else
@@ -880,10 +883,6 @@ function _cleanup()
 
     _ZAP_SOCKET[] = nothing
     _ZAP_TASK[] = nothing
-    _CURVE_ENABLED[] = false
-    _CURVE_ALLOW_ANY[] = false
-    _CURVE_SERVER_SECRET[] = ""
-    _CURVE_SERVER_PUBLIC[] = ""
     _GATE_SOCKET[] = nothing
     _STREAM_SOCKET[] = nothing
     _SERVICE_SOCKET[] = nothing

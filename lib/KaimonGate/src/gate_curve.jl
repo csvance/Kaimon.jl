@@ -25,11 +25,9 @@ const _ZMQ_ZAP_DOMAIN      = 55
 const _ZAP_ENDPOINT = "inproc://zeromq.zap.01"
 const _ZAP_DOMAIN   = "kaimon"
 
-# CURVE server state (set in serve() when curve=true) + ZAP handler handles.
-const _CURVE_SERVER_SECRET = Ref{String}("")
-const _CURVE_SERVER_PUBLIC = Ref{String}("")
-const _CURVE_ENABLED   = Ref{Bool}(false)   # remembered for restart replay
-const _CURVE_ALLOW_ANY = Ref{Bool}(false)   # remembered for restart replay
+# The CURVE keypair and flags are session fields (see GateSession). The ZAP handles stay
+# module-level: `serve` must start the handler BEFORE any CURVE socket binds, which is before
+# it has resolved enough to build the session.
 const _ZAP_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 const _ZAP_TASK   = Ref{Union{Task,Nothing}}(nothing)
 
