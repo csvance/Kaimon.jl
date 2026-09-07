@@ -858,16 +858,12 @@ function _cleanup()
     end
     # Drain any undelivered worker replies and reset the worker counter so a
     # restart (same process, fresh serve()) starts with an empty channel.
-    while isready(_gate_outbox())
-        try; take!(_gate_outbox()); catch; break; end
-    end
-    Threads.atomic_xchg!(_gate_inflight(), 0)
+    # The outbox and the worker counter used to be drained here so a same-process restart
+    # started clean. They are session fields now, so the next serve() builds new ones and
+    # dropping this session takes these with it.
 
-    # Drain leftover stream publishes and clear presence state (the broadcaster
-    # has already stopped above) so a same-process restart starts clean.
-    while isready(_stream_outbox())
-        try; take!(_stream_outbox()); catch; break; end
-    end
+    # The publish queue goes with the session too. The presence table does not — it is
+    # module-level, so the counts for the socket we just closed have to be cleared by hand.
     lock(_STREAM_SUBS_LOCK) do
         empty!(_STREAM_SUBS)
         empty!(_ON_STREAM_SUBSCRIBE)
