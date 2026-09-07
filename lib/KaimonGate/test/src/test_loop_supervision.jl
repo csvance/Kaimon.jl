@@ -62,36 +62,43 @@ end
 end
 
 # ── Supervisor lifecycle gate ─────────────────────────────────────────────────
-# stop, restart, :shutdown and :restart each clear _RUNNING and may raise
+# stop, restart, :shutdown and :restart each clear _running() and may raise
 # _SHUTTING_DOWN or _RESTARTING first; the supervisor must stand down on any of them.
 
 @testset "_gate_should_run honours every lifecycle flag" begin
-    saved = (KG._RUNNING[], KG._SHUTTING_DOWN[], KG._RESTARTING[])
+    saved = (KG._SESSION[], KG._SHUTTING_DOWN[], KG._RESTARTING[])
     try
-        KG._RUNNING[] = true; KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = false
+        # A session with no sockets is enough: the supervisor only reads flags.
+        KG._SESSION[] = KG.GateSession(; running = true)
+        KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = false
         @test KG._gate_should_run()
         KG._SHUTTING_DOWN[] = true
         @test !KG._gate_should_run()
         KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = true
         @test !KG._gate_should_run()
-        KG._RESTARTING[] = false; KG._RUNNING[] = false
+        KG._RESTARTING[] = false; KG._running!(false)
+        @test !KG._gate_should_run()
+        # Dropping the session is the other way to stop being runnable, and it is the one
+        # _cleanup uses.
+        KG._running!(true)
+        KG._SESSION[] = nothing
         @test !KG._gate_should_run()
         # The fault-path backoff returns as soon as the gate is asked to stop.
-        KG._RUNNING[] = true
+        KG._SESSION[] = KG.GateSession(; running = true)
         t = @elapsed begin
-            @async (sleep(0.1); KG._RUNNING[] = false)
+            @async (sleep(0.1); KG._running!(false))
             KG._sleep_while_running(5.0)
         end
         @test t < 2.0
     finally
-        KG._RUNNING[], KG._SHUTTING_DOWN[], KG._RESTARTING[] = saved
+        KG._SESSION[], KG._SHUTTING_DOWN[], KG._RESTARTING[] = saved
     end
 end
 
 # ── Rebind helper against a real socket (no Kaimon involved) ──────────────────
 
 @testset "_ensure_router! keeps a live socket and rebinds a dead one" begin
-    if KG._RUNNING[] || Sys.iswindows()
+    if KG._running() || Sys.iswindows()
         @test_skip true
     else
         saved = (KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._MODE[], KG._SESSION_ID[])

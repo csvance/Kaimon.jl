@@ -9,7 +9,7 @@
 # client allow-list, and the ZAP authorization handler.
 #
 # `include`d into the KaimonGate module after gate.jl (shares its globals:
-# `_gate_cache_dir`, `_RUNNING`). CURVE is opt-in (`serve(...; curve=true)`); the
+# `_gate_cache_dir`, `_running()`). CURVE is opt-in (`serve(...; curve=true)`); the
 # plain :tcp and :ipc paths are untouched.
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -433,7 +433,7 @@ function _start_zap_handler!(ctx::ZMQ.Context; allow_any::Bool=false)
     _ZAP_TASK[] = Threads.@spawn :interactive begin
         try
             # Run until the socket this task owns is retired — `stop`/`_cleanup` nil it, and
-            # nothing else binds this endpoint. Keying on `_RUNNING` instead was a race: the
+            # nothing else binds this endpoint. Keying on `_running()` instead was a race: the
             # handler must start BEFORE the CURVE sockets bind, but `serve` does not set that
             # flag until much later and yields in between, so a handler scheduled in the gap
             # fell straight through to the `finally` below and closed its own socket. The

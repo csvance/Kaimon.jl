@@ -131,7 +131,7 @@ function _install_infiltrator_hook!()
         terminal = nothing, repl = nothing, nostack = false,
     )
         M = $(@__MODULE__)
-        if M._INFILTRATOR_DISABLED[] || !M._RUNNING[]
+        if M._INFILTRATOR_DISABLED[] || !M._running()
             orig = M._INFILTRATOR_ORIG_PROMPT[]
             return orig === nothing ? nothing :
                    orig(mod, locals, file, fileline, ex, bt;

@@ -589,7 +589,7 @@ end
 
 @testset "Windows-coerced local TCP gate is discovered via file (#41)" begin
     KG = Kaimon.KaimonGate
-    if KG._RUNNING[]
+    if KG._running()
         @info "Skipping — a gate is already running in this process"
         @test_skip false
     else

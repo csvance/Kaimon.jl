@@ -116,7 +116,7 @@ end
     # session), attach to it non-destructively: temporarily add the test tool to
     # the existing gate's tool list instead of stopping and restarting the gate.
     # Otherwise start a fresh gate for the test and stop it when done.
-    was_running = Kaimon.KaimonGate._RUNNING[]
+    was_running = Kaimon.KaimonGate._running()
 
     if was_running
         orig_tools = copy(Kaimon.KaimonGate._SESSION_TOOLS[])
@@ -269,7 +269,7 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 @testset "Gate TCP ephemeral port + auth" begin
-    if Kaimon.KaimonGate._RUNNING[]
+    if Kaimon.KaimonGate._running()
         @info "Skipping TCP test — gate already running"
         @test_skip false
         return
@@ -289,7 +289,7 @@ end
     )
     sleep(0.2)
 
-    @test Kaimon.KaimonGate._RUNNING[]
+    @test Kaimon.KaimonGate._running()
     @test Kaimon.KaimonGate._MODE[] == :tcp
 
     sock = Kaimon.KaimonGate._GATE_SOCKET[]
@@ -344,7 +344,7 @@ end
         sleep(0.1)
     end
 
-    @test !Kaimon.KaimonGate._RUNNING[]
+    @test !Kaimon.KaimonGate._running()
     @test isempty(Kaimon.KaimonGate._AUTH_TOKEN[])
 end
 
@@ -416,22 +416,23 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 @testset "Gate.restart guards" begin
-    orig_running = Kaimon.KaimonGate._RUNNING[]
-    orig_restart = Kaimon.KaimonGate._ALLOW_RESTART[]
+    KG = Kaimon.KaimonGate
+    orig_session = KG._SESSION[]
+    orig_restart = KG._ALLOW_RESTART[]
 
     @testset "errors when gate is not running" begin
-        Kaimon.KaimonGate._RUNNING[] = false
-        @test_throws ErrorException("Gate is not running") Kaimon.KaimonGate.restart()
+        KG._SESSION[] = nothing          # no session at all ⇒ not running
+        @test_throws ErrorException("Gate is not running") KG.restart()
     end
 
     @testset "errors when restart is disabled" begin
-        Kaimon.KaimonGate._RUNNING[] = true
-        Kaimon.KaimonGate._ALLOW_RESTART[] = false
-        @test_throws ErrorException("Restart is disabled for this session (allow_restart=false)") Kaimon.KaimonGate.restart()
+        KG._SESSION[] = KG.GateSession(; running = true)
+        KG._ALLOW_RESTART[] = false
+        @test_throws ErrorException("Restart is disabled for this session (allow_restart=false)") KG.restart()
     end
 
-    Kaimon.KaimonGate._RUNNING[] = orig_running
-    Kaimon.KaimonGate._ALLOW_RESTART[] = orig_restart
+    KG._SESSION[] = orig_session
+    KG._ALLOW_RESTART[] = orig_restart
 end
 
 # NOTE: handle_message(:restart) is not unit-tested here because the handler

@@ -150,7 +150,7 @@ end
 
 # ── Live transport (raw sockets — exercises make_curve_* + ZAP) ────────────────
 
-if KG._RUNNING[]
+if KG._running()
     @warn "A gate is already running — skipping CURVE transport tests."
     @testset "CURVE transport (skipped — gate already running)" begin
         @test_skip true
@@ -249,18 +249,18 @@ end
 end
 
 # The handler must start BEFORE the CURVE sockets bind, but `serve` does not mark the gate
-# running until much later and yields in between. While the loop was keyed on `_RUNNING`, a
+# running until much later and yields in between. While the loop was keyed on `_running()`, a
 # handler scheduled in that gap fell straight through to its `finally`, closed its own socket,
 # and left the gate to bind its CURVE sockets with no authenticator. It now runs until the
 # socket it owns is retired, so the flag's timing cannot reach it.
 @testset "ZAP handler outlives a start before the running flag" begin
     mktempdir() do dir
         withenv("XDG_CACHE_HOME" => dir) do
-            prev_running = KG._RUNNING[]
             prev_sock, prev_task = KG._ZAP_SOCKET[], KG._ZAP_TASK[]
             ctx = ZMQ.Context()
             try
-                KG._RUNNING[] = false          # the window _serve leaves open
+                # No session at all, so the gate is as un-running as it gets — the window
+                # _serve leaves open, only wider.
                 task = KG._start_zap_handler!(ctx; allow_any = true)
                 for _ in 1:100                 # give the spawned task time to be scheduled
                     istaskdone(task) && break
@@ -274,7 +274,6 @@ end
                 try; ZMQ.close(ctx); catch; end
                 KG._ZAP_SOCKET[] = prev_sock
                 KG._ZAP_TASK[]   = prev_task
-                KG._RUNNING[]    = prev_running
             end
         end
     end
@@ -337,7 +336,7 @@ end
                       host = "127.0.0.1", port = 0, curve = true, allow_any = true)
             sleep(0.25)
             try
-                @test KG._RUNNING[]
+                @test KG._running()
                 @test KG._CURVE_ENABLED[]
                 spub = KG._CURVE_SERVER_PUBLIC[]
                 @test length(spub) == 40
@@ -416,4 +415,4 @@ end
     end
 end
 
-end  # if !_RUNNING[]
+end  # if !_running()

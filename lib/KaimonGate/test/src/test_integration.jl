@@ -5,7 +5,7 @@ using Serialization
 
 # ── Guard: skip all integration tests if a gate is already running ────────────
 
-if KaimonGate._RUNNING[]
+if KaimonGate._running()
     @warn "A gate is already running — skipping ZMQ integration tests to avoid conflicts."
     @testset "ZMQ integration (skipped — gate already running)" begin
         @test_skip true
@@ -33,7 +33,7 @@ end
     KaimonGate._serve(name="test", session_id=session_id, force=true)
     sleep(0.15)   # let sockets bind
 
-    @test KaimonGate._RUNNING[]
+    @test KaimonGate._running()
 
     sock_dir  = KaimonGate.sock_dir()
     rep_path  = joinpath(sock_dir, "$session_id.sock")
@@ -56,7 +56,7 @@ end
         sleep(0.1)
     end
 
-    @test !KaimonGate._RUNNING[]
+    @test !KaimonGate._running()
     end # if Sys.iswindows()
 end
 
@@ -158,7 +158,7 @@ end
     )
     sleep(0.2)
 
-    @test KaimonGate._RUNNING[]
+    @test KaimonGate._running()
     @test KaimonGate._MODE[] == :tcp
     sock = KaimonGate._GATE_SOCKET[]
     @test sock !== nothing
@@ -198,7 +198,7 @@ end
         sleep(0.1)
     end
 
-    @test !KaimonGate._RUNNING[]
+    @test !KaimonGate._running()
     @test isempty(KaimonGate._AUTH_TOKEN[])
 end
 
@@ -219,7 +219,7 @@ end
         KaimonGate._serve(name="test", session_id=sid_hidden, force=true, discoverable=false)
         sleep(0.15)
         try
-            @test KaimonGate._RUNNING[]
+            @test KaimonGate._running()
             @test !isfile(meta_hidden)            # not advertised
         finally
             KaimonGate.stop(); sleep(0.1)
@@ -241,4 +241,4 @@ end
     end
 end
 
-end  # if !_RUNNING[]
+end  # if !_running()

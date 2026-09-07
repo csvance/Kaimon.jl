@@ -540,7 +540,7 @@ function handle_message(request::NamedTuple)
         return (type = :tools, tools = tool_meta)
     elseif msg_type == :shutdown
         _SHUTTING_DOWN[] = true
-        _RUNNING[] = false
+        _running!(false)
         return (type = :ok, message = "shutting down")
     elseif msg_type == :restart
         # Save metadata before cleanup
@@ -554,7 +554,7 @@ function handle_message(request::NamedTuple)
         # We need the ZMQ sockets to stay open for ~0.3 s so the :ok reply
         # above actually reaches the client before we tear down the process.
         _RESTARTING[] = true
-        _RUNNING[] = false
+        _running!(false)
 
         @async begin
             sleep(0.3)  # Let ZMQ reply flush through IPC buffer
@@ -660,7 +660,7 @@ function _drain_gate_outbox!(socket::ZMQ.Socket)
         catch
             # ROUTER drops replies to vanished peers (timed-out/gone clients) —
             # expected; nothing else can be done with this reply.
-            _RUNNING[] || break
+            _running() || break
         end
     end
 end
@@ -723,7 +723,7 @@ function message_loop(socket::ZMQ.Socket)
     # Tracked so we only call setsockopt on an actual transition. -1 forces the
     # first apply. See _GATE_RCVTIMEO_BUSY/_IDLE for why (the 200ms drag-lag fix).
     cur_rcvtimeo = -1
-    while _RUNNING[]
+    while _running()
         try
             # 1. flush any ready worker replies first (owner-only socket access)
             _drain_gate_outbox!(socket)
@@ -766,8 +766,8 @@ function message_loop(socket::ZMQ.Socket)
             Threads.atomic_add!(_GATE_INFLIGHT, 1)
             Threads.@spawn _serve_request(identity, corr_id, request)
         catch e
-            _RUNNING[] || break   # clean shutdown
-            # Timeout is expected — just loop to check _RUNNING and drain outbox.
+            _running() || break   # clean shutdown
+            # Timeout is expected — just loop to check _running() and drain outbox.
             e isa ZMQ.TimeoutError && continue
             if e isa ZMQ.StateError
                 if _zmq_error_disposition(e) === :retry
@@ -778,7 +778,7 @@ function message_loop(socket::ZMQ.Socket)
                 end
                 # The socket or context is unusable: rethrow to the supervisor, which
                 # rebinds and respawns. A `break` here left the gate bound and
-                # _RUNNING but deaf for the rest of the process.
+                # _running() but deaf for the rest of the process.
                 @warn "Kaimon gate ROUTER socket unusable; leaving message_loop for the supervisor" exception = e
                 rethrow()
             end

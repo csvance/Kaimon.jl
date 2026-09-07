@@ -21,19 +21,20 @@ and restore every touched global afterwards. No socket is bound: `_serve`'s merg
 returns before any transport work, so the flag is all the branch needs."""
 function with_running_gate(f, tools; namespace = "incumbent_ns")
     saved = (
-        running = KG._RUNNING[],
+        session = KG._SESSION[],
         tools = KG._SESSION_TOOLS[],
         ns = KG._SESSION_NAMESPACE[],
         sid = KG._SESSION_ID[],
     )
-    KG._RUNNING[] = true
+    KG._SESSION[] = KG.GateSession(;
+        running = true, tools = tools, namespace = namespace, id = "test-session")
     KG._SESSION_TOOLS[] = tools
     KG._SESSION_NAMESPACE[] = namespace
     KG._SESSION_ID[] = "test-session"
     try
         f()
     finally
-        KG._RUNNING[] = saved.running
+        KG._SESSION[] = saved.session
         KG._SESSION_TOOLS[] = saved.tools
         KG._SESSION_NAMESPACE[] = saved.ns
         KG._SESSION_ID[] = saved.sid

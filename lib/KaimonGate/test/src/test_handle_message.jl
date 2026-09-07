@@ -3,29 +3,43 @@ using KaimonGate
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-"""Save and restore global Refs around a test block."""
+"""
+Run `f` against a synthetic gate session, without binding any socket.
+
+This used to save and restore five module Refs by hand — the same bookkeeping `_cleanup` had
+to do, and just as easy to get out of step. It now builds a `GateSession`, runs the block and
+puts back whatever was there. The Refs it still sets alongside are the fields whose call sites
+have not moved onto the session yet.
+"""
 function with_gate_state(f;
     mode=nothing, token=nothing, tools=nothing,
     running=nothing, stream_endpoint=nothing
 )
-    orig_mode     = KaimonGate._MODE[]
-    orig_token    = KaimonGate._AUTH_TOKEN[]
-    orig_tools    = KaimonGate._SESSION_TOOLS[]
-    orig_running  = KaimonGate._RUNNING[]
-    orig_endpoint = KaimonGate._STREAM_ENDPOINT[]
+    KG = KaimonGate
+    orig_session  = KG._SESSION[]
+    orig_mode     = KG._MODE[]
+    orig_token    = KG._AUTH_TOKEN[]
+    orig_tools    = KG._SESSION_TOOLS[]
+    orig_endpoint = KG._STREAM_ENDPOINT[]
     try
-        mode             !== nothing && (KaimonGate._MODE[]            = mode)
-        token            !== nothing && (KaimonGate._AUTH_TOKEN[]      = token)
-        tools            !== nothing && (KaimonGate._SESSION_TOOLS[]   = tools)
-        running          !== nothing && (KaimonGate._RUNNING[]         = running)
-        stream_endpoint  !== nothing && (KaimonGate._STREAM_ENDPOINT[] = stream_endpoint)
+        KG._SESSION[] = KG.GateSession(;
+            mode            = something(mode, :ipc),
+            auth_token      = something(token, ""),
+            tools           = something(tools, KG.GateTool[]),
+            running         = something(running, false),
+            stream_endpoint = something(stream_endpoint, ""),
+        )
+        mode            !== nothing && (KG._MODE[]            = mode)
+        token           !== nothing && (KG._AUTH_TOKEN[]      = token)
+        tools           !== nothing && (KG._SESSION_TOOLS[]   = tools)
+        stream_endpoint !== nothing && (KG._STREAM_ENDPOINT[] = stream_endpoint)
         f()
     finally
-        KaimonGate._MODE[]            = orig_mode
-        KaimonGate._AUTH_TOKEN[]      = orig_token
-        KaimonGate._SESSION_TOOLS[]   = orig_tools
-        KaimonGate._RUNNING[]         = orig_running
-        KaimonGate._STREAM_ENDPOINT[] = orig_endpoint
+        KG._SESSION[]         = orig_session
+        KG._MODE[]            = orig_mode
+        KG._AUTH_TOKEN[]      = orig_token
+        KG._SESSION_TOOLS[]   = orig_tools
+        KG._STREAM_ENDPOINT[] = orig_endpoint
     end
 end
 
@@ -170,18 +184,19 @@ end
 # ── :shutdown ─────────────────────────────────────────────────────────────────
 
 @testset ":shutdown" begin
-    # Shutdown sets _SHUTTING_DOWN and _RUNNING; restore both
+    # :shutdown marks the session not-running and raises _SHUTTING_DOWN, so it needs a session
+    # to write to. with_gate_state supplies one and takes it away again.
     orig_shutting = KaimonGate._SHUTTING_DOWN[]
-    orig_running  = KaimonGate._RUNNING[]
     try
-        resp = KaimonGate.handle_message((type=:shutdown,))
-        @test resp.type == :ok
-        @test occursin("shutting down", resp.message)
-        @test KaimonGate._SHUTTING_DOWN[] == true
-        @test KaimonGate._RUNNING[] == false
+        with_gate_state(running=true) do
+            resp = KaimonGate.handle_message((type=:shutdown,))
+            @test resp.type == :ok
+            @test occursin("shutting down", resp.message)
+            @test KaimonGate._SHUTTING_DOWN[] == true
+            @test KaimonGate._running() == false
+        end
     finally
         KaimonGate._SHUTTING_DOWN[] = orig_shutting
-        KaimonGate._RUNNING[]       = orig_running
     end
 end
 
@@ -189,17 +204,17 @@ end
 # Adapted from Kaimon gate_async_tests "Gate.restart guards"
 
 @testset "restart() guards" begin
-    orig_running = KaimonGate._RUNNING[]
+    orig_session = KaimonGate._SESSION[]
     orig_restart = KaimonGate._ALLOW_RESTART[]
     try
-        KaimonGate._RUNNING[] = false
+        KaimonGate._SESSION[] = nothing          # no session at all ⇒ not running
         @test_throws ErrorException KaimonGate.restart()
 
-        KaimonGate._RUNNING[]       = true
+        KaimonGate._SESSION[] = KaimonGate.GateSession(; running = true)
         KaimonGate._ALLOW_RESTART[] = false
         @test_throws ErrorException KaimonGate.restart()
     finally
-        KaimonGate._RUNNING[]       = orig_running
+        KaimonGate._SESSION[]       = orig_session
         KaimonGate._ALLOW_RESTART[] = orig_restart
     end
 end

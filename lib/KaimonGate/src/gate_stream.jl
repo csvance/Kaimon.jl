@@ -84,7 +84,7 @@ function _drain_xpub_events(sock::ZMQ.Socket)
         frame = try
             _zmq_recv(sock)
         catch e
-            e isa ZMQ.StateError && !_RUNNING[] && return
+            e isa ZMQ.StateError && !_running() && return
             UInt8[]
         end
         isempty(frame) && return
@@ -99,7 +99,7 @@ end
 # total idle (those arrive on the socket, not the channel, so they can't ride the
 # `take!` wait). This replaces the old 5ms (200Hz) spin — which, with a subscriber
 # attached, cost a getsockopt→poll() syscall per tick and woke the whole thread
-# pool ~200×/s (measured ~10% CPU per idle gate). Shutdown: a caller sets _RUNNING
+# pool ~200×/s (measured ~10% CPU per idle gate). Shutdown: a caller sets _running()
 # false and _cleanup nudges the outbox, so the parked `take!` returns promptly.
 function _stream_broadcaster(sock::ZMQ.Socket)
     last_reconcile = time()
@@ -107,7 +107,7 @@ function _stream_broadcaster(sock::ZMQ.Socket)
         try; put!(_STREAM_OUTBOX, _STREAM_WAKE); catch; end
     end
     try
-        while _RUNNING[]
+        while _running()
             # Block until woken by a publish, the sub-poll tick, or the shutdown
             # nudge. _STREAM_WAKE (empty frames) carries no data — just a wake.
             frames = try
@@ -115,7 +115,7 @@ function _stream_broadcaster(sock::ZMQ.Socket)
             catch
                 break  # outbox closed → exit
             end
-            _RUNNING[] || break
+            _running() || break
             _safe_stream_send(sock, frames)
             # Coalesce any further-queued publishes (owner-only send).
             while isready(_STREAM_OUTBOX)
@@ -270,9 +270,9 @@ function _start_revise_watcher()
     isdefined(Main.Revise, :revision_event) || return
     _REVISE_WATCHER_TASK[] = @async begin
         try
-            while _RUNNING[]
+            while _running()
                 wait(Main.Revise.revision_event)
-                _RUNNING[] || break
+                _running() || break
                 Base.reset(Main.Revise.revision_event)
                 project_path = dirname(Base.active_project())
                 _publish_stream("files_changed", project_path)

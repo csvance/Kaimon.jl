@@ -192,7 +192,6 @@ const _GATE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 const _STREAM_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)  # PUB for streaming output
 const _STREAM_ENDPOINT = Ref{String}("")                       # resolved PUB endpoint
 const _SESSION_ID = Ref{String}("")
-const _RUNNING = Ref{Bool}(false)
 const _START_TIME = Ref{Float64}(0.0)
 const _MIRROR_REPL = Ref{Bool}(false)
 const _ALLOW_MIRROR = Ref{Bool}(true)

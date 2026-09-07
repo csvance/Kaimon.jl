@@ -175,7 +175,7 @@ explicitly (it still reads env vars / `kaimon.toml` for its settings).
 Configuration priority: env vars > kaimon.toml > defaults.
 """
 function _auto_serve!()
-    _RUNNING[] && return  # already running
+    _running() && return  # already running
 
     # Merge kaimon.toml [gate] config with env var overrides
     toml = _load_gate_config()
