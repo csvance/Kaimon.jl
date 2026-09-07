@@ -363,14 +363,6 @@ function _serve(;
         end
     end
 
-    # Initial receive timeout so the owner loop cycles back to drain _GATE_OUTBOX
-    # (worker replies) and re-check _RUNNING. message_loop then adapts this per
-    # iteration (short while replies are in flight, long when idle) — see
-    # _GATE_RCVTIMEO_BUSY/_IDLE; the flat 200ms here was the input drag-lag.
-    # linger=0: close() returns immediately without blocking to drain.
-    socket.rcvtimeo = _GATE_RCVTIMEO_IDLE[]
-    socket.linger = 0
-
     # CURVE (opt-in, TCP only): make the REP socket a CURVE server. Unless
     # allow_any, also start a ZAP handler (one per context, covers PUB too) and
     # set ZAP_DOMAIN so libzmq enforces the client allow-list (fail-closed: an
@@ -385,9 +377,9 @@ function _serve(;
             isempty(ck) || authorize_client!(ck)
         end
         allow_any || _start_zap_handler!(ctx; allow_any = false)
-        make_curve_server!(socket, ssec)
-        allow_any || _setsockopt_str(socket, _ZMQ_ZAP_DOMAIN, _ZAP_DOMAIN)
     end
+    # Shared with _ensure_router!, so a supervisor rebind replays exactly this.
+    _configure_router_socket!(socket; curve = mode == :tcp && curve, allow_any)
 
     # Bind endpoint — IPC (local socket file) or TCP (network port)
     # TCP mode supports port=0 for ephemeral port assignment (ZMQ picks a free port).
@@ -476,15 +468,21 @@ function _serve(;
         try
             _stream_broadcaster(pub_socket)
         catch e
-            @debug "Stream broadcaster exited" exception = e
+            if _RUNNING[]
+                @warn "Kaimon gate stream broadcaster exited while the gate is running" exception = (e, catch_backtrace())
+            else
+                @debug "Stream broadcaster exited" exception = e
+            end
         end
     end
     local this_task
     this_task = _GATE_TASK[] = Threads.@spawn :interactive begin
         try
-            message_loop(socket)
+            _supervise_message_loop(socket)
         catch e
-            @debug "Gate task exited" exception = e
+            # message_loop faults are handled inside the supervisor; this is the
+            # supervisor itself failing.
+            @error "Kaimon gate supervisor task exited" exception = (e, catch_backtrace())
         finally
             if _SHUTTING_DOWN[]
                 # Remote shutdown: run optional cleanup hook, then exit
@@ -601,6 +599,120 @@ function _serve(;
     end
 
     return sid
+end
+
+# ── Control-plane supervision ─────────────────────────────────────────────────
+# The ROUTER owner loop is the gate's whole control plane. If it exits while the
+# gate is running, Kaimon gets no pong and every tool call fails with "Gate not
+# connected" while the process, the bound socket and _RUNNING all look healthy.
+# It used to be spawned once with its exit swallowed at @debug, so one EINTR
+# silenced a gate for the rest of the process.
+
+_gate_should_run() = _RUNNING[] && !_SHUTTING_DOWN[] && !_RESTARTING[]
+
+# sleep(s) that returns early when the gate is asked to stop, so a backoff never
+# holds up stop()/restart(), which wait on the gate task.
+function _sleep_while_running(s::Real)
+    deadline = time() + s
+    while _gate_should_run() && time() < deadline
+        sleep(clamp(deadline - time(), 0.001, 0.05))
+    end
+    return nothing
+end
+
+"""
+    _supervise_message_loop(socket)
+
+Run `message_loop` for as long as the gate should be running. It returns normally
+only once `_RUNNING` is false; any other exit is logged and the loop is respawned
+after a backoff, on a rebound ROUTER if the old one is dead (`_ensure_router!`).
+`stop()`, `restart()`, `:shutdown` and `:restart` clear the lifecycle flags
+first, so they exit here quietly.
+"""
+function _supervise_message_loop(socket::ZMQ.Socket)
+    backoff = 0.1
+    while _gate_should_run()
+        t0 = time()
+        err = nothing
+        try
+            message_loop(socket)
+        catch e
+            err = (e, catch_backtrace())
+        end
+        if !_gate_should_run()
+            err === nothing || @debug "Kaimon gate message loop error during shutdown" exception = err
+            break
+        end
+        # A healthy stretch before the fault resets the backoff.
+        time() - t0 > 60.0 && (backoff = 0.1)
+        uptime_s = round(time() - t0; digits = 1)
+        if err === nothing
+            @warn "Kaimon gate message loop returned while the gate is running; respawning" uptime_s backoff_s = backoff
+        else
+            @error "Kaimon gate message loop died; respawning" exception = err uptime_s backoff_s = backoff
+        end
+        _sleep_while_running(backoff)
+        backoff = min(backoff * 2, 5.0)
+        _gate_should_run() || break
+        socket = try
+            _ensure_router!(socket)
+        catch e
+            # Context gone or bind failed: keep the old handle, probe again next pass.
+            @error "Kaimon gate could not rebind its ROUTER socket; will retry" exception = (e, catch_backtrace())
+            socket
+        end
+    end
+    return nothing
+end
+
+"""
+    _configure_router_socket!(socket; curve, allow_any)
+
+Per-socket options for the request ROUTER, applied by `serve` and replayed by
+`_ensure_router!` on a rebind. The receive timeout makes the owner loop cycle
+back to drain `_GATE_OUTBOX` and re-check `_RUNNING` (`message_loop` then adapts
+it per iteration, see `_GATE_RCVTIMEO_BUSY`/`_IDLE`); `linger = 0` so `close()`
+does not block; the CURVE server role reuses the context-wide keypair and ZAP
+handler `serve` set up.
+"""
+function _configure_router_socket!(socket::ZMQ.Socket; curve::Bool, allow_any::Bool)
+    socket.rcvtimeo = _GATE_RCVTIMEO_IDLE[]
+    socket.linger = 0
+    if curve
+        make_curve_server!(socket, _CURVE_SERVER_SECRET[])
+        allow_any || _setsockopt_str(socket, _ZMQ_ZAP_DOMAIN, _ZAP_DOMAIN)
+    end
+    return socket
+end
+
+"""
+    _ensure_router!(sock) -> ZMQ.Socket
+
+Return a usable ROUTER on the gate's endpoint: `sock` itself if it is open and
+answers a `getsockopt`, otherwise a fresh socket configured and bound in its place
+(the IPC path is unlinked first, as `serve(force=true)` does). The client's DEALER
+reconnects on its own. Throws if the context is gone or the bind fails; the
+supervisor logs that and retries.
+"""
+function _ensure_router!(sock::ZMQ.Socket)
+    alive = isopen(sock) && (try; sock.events; true; catch; false; end)
+    alive && return sock
+    try; close(sock); catch; end
+    ctx = _GATE_CONTEXT[]
+    ctx === nothing && error("gate ZMQ context is gone; cannot rebind the ROUTER")
+    new = _zmq_socket(ctx, ROUTER)
+    _configure_router_socket!(new; curve = _CURVE_ENABLED[], allow_any = _CURVE_ALLOW_ANY[])
+    endpoint = if _MODE[] == :tcp
+        "tcp://$(_TCP_HOST[]):$(_TCP_PORT[])"
+    else
+        sock_path = joinpath(sock_dir(), "$(_SESSION_ID[]).sock")
+        rm(sock_path; force = true)
+        "ipc://$(sock_path)"
+    end
+    bind(new, endpoint)
+    _GATE_SOCKET[] = new
+    @warn "Kaimon gate ROUTER socket was dead; rebound" endpoint
+    return new
 end
 
 """

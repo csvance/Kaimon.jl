@@ -1,0 +1,141 @@
+# Control-plane supervision, the parts checkable without a live Kaimon: ZMQ error
+# classification, worker-slot accounting, the supervisor's lifecycle gate, and
+# _ensure_router! against a real socket. test_integration.jl covers the loop itself.
+
+using Test
+using KaimonGate
+using Serialization
+
+const KG = KaimonGate
+const ZMQ = KG.ZMQ
+
+# ── ZMQ.StateError classification ─────────────────────────────────────────────
+# Messages are built the way ZMQ.jl builds them (libzmq's zmq_strerror).
+
+@testset "ZMQ error disposition" begin
+    eintr = ZMQ.StateError(KG._zmq_errno_msg(Base.Libc.EINTR))
+    @test KG._zmq_error_disposition(eintr) === :retry
+    @test KG._zmq_error_disposition(ZMQ.StateError("Interrupted system call")) === :retry
+
+    eterm = ZMQ.StateError(KG._zmq_errno_msg(ZMQ.lib.ETERM))
+    @test KG._zmq_error_disposition(eterm) === :restart
+    enotsock = ZMQ.StateError(KG._zmq_errno_msg(Base.Libc.ENOTSOCK))
+    @test KG._zmq_error_disposition(enotsock) === :restart
+    # Unrecognised text goes to the supervisor too.
+    @test KG._zmq_error_disposition(ZMQ.StateError("some new libzmq condition")) === :restart
+end
+
+# ── Worker-slot accounting ────────────────────────────────────────────────────
+
+function _drain_outbox!()
+    while isready(KG._GATE_OUTBOX)
+        take!(KG._GATE_OUTBOX)
+    end
+end
+
+@testset "_serve_request releases its slot and always replies" begin
+    _drain_outbox!()
+    base = KG._GATE_INFLIGHT[]
+    id, cid = UInt8[1, 2], UInt8[3, 4]
+
+    # Normal path: a ping is handled, replied to, and the slot comes back.
+    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+    KG._serve_request(id, cid, (type = :ping,))
+    @test KG._GATE_INFLIGHT[] == base
+    (rid, rcid, bytes) = take!(KG._GATE_OUTBOX)
+    @test rid == id && rcid == cid
+    @test deserialize(IOBuffer(bytes)).type === :pong
+
+    # handle_message cannot dispatch a non-NamedTuple: error reply, slot released.
+    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+    KG._serve_request(id, cid, Dict(:type => :ping))
+    @test KG._GATE_INFLIGHT[] == base
+    reply = deserialize(IOBuffer(take!(KG._GATE_OUTBOX)[3]))
+    @test reply.type === :error
+
+    # An unknown request type is still a reply, not a leaked slot.
+    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+    KG._serve_request(id, cid, (type = :no_such_message,))
+    @test KG._GATE_INFLIGHT[] == base
+    @test isready(KG._GATE_OUTBOX)
+    _drain_outbox!()
+end
+
+# ── Supervisor lifecycle gate ─────────────────────────────────────────────────
+# stop, restart, :shutdown and :restart each clear _RUNNING and may raise
+# _SHUTTING_DOWN or _RESTARTING first; the supervisor must stand down on any of them.
+
+@testset "_gate_should_run honours every lifecycle flag" begin
+    saved = (KG._RUNNING[], KG._SHUTTING_DOWN[], KG._RESTARTING[])
+    try
+        KG._RUNNING[] = true; KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = false
+        @test KG._gate_should_run()
+        KG._SHUTTING_DOWN[] = true
+        @test !KG._gate_should_run()
+        KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = true
+        @test !KG._gate_should_run()
+        KG._RESTARTING[] = false; KG._RUNNING[] = false
+        @test !KG._gate_should_run()
+        # The fault-path backoff returns as soon as the gate is asked to stop.
+        KG._RUNNING[] = true
+        t = @elapsed begin
+            @async (sleep(0.1); KG._RUNNING[] = false)
+            KG._sleep_while_running(5.0)
+        end
+        @test t < 2.0
+    finally
+        KG._RUNNING[], KG._SHUTTING_DOWN[], KG._RESTARTING[] = saved
+    end
+end
+
+# ── Rebind helper against a real socket (no Kaimon involved) ──────────────────
+
+@testset "_ensure_router! keeps a live socket and rebinds a dead one" begin
+    if KG._RUNNING[] || Sys.iswindows()
+        @test_skip true
+    else
+        saved = (KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._MODE[], KG._SESSION_ID[])
+        ctx = ZMQ.Context()
+        sid = "test-rebind-$(bytes2hex(rand(UInt8, 4)))"
+        path = joinpath(KG.sock_dir(), "$sid.sock")
+        try
+            KG._GATE_CONTEXT[] = ctx
+            KG._MODE[] = :ipc
+            KG._SESSION_ID[] = sid
+            s = KG._zmq_socket(ctx, ZMQ.ROUTER)
+            KG._configure_router_socket!(s; curve = false, allow_any = false)
+            ZMQ.bind(s, "ipc://$path")
+            KG._GATE_SOCKET[] = s
+
+            # Live socket: returned untouched.
+            @test KG._ensure_router!(s) === s
+            @test KG._GATE_SOCKET[] === s
+
+            # Dead socket (the ENOTSOCK case): rebound on the same endpoint with
+            # the same options.
+            close(s)
+            s2 = @test_logs (:warn, r"rebound") KG._ensure_router!(s)
+            @test s2 !== s
+            @test isopen(s2)
+            @test KG._GATE_SOCKET[] === s2
+            @test ispath(path)
+            @test s2.rcvtimeo == KG._GATE_RCVTIMEO_IDLE[]
+            @test s2.linger == 0
+
+            # A client reaches the rebound endpoint.
+            d = ZMQ.Socket(ctx, ZMQ.DEALER)
+            d.linger = 0
+            ZMQ.connect(d, "ipc://$path")
+            ZMQ.send(d, "hello")
+            s2.rcvtimeo = 2000
+            parts = KG._recv_multipart(s2)
+            @test String(parts[end]) == "hello"
+            close(d)
+            close(s2)
+        finally
+            KG._GATE_CONTEXT[], KG._GATE_SOCKET[], KG._MODE[], KG._SESSION_ID[] = saved
+            try; close(ctx); catch; end
+            rm(path; force = true)
+        end
+    end
+end

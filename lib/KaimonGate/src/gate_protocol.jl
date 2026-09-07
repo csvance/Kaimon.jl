@@ -660,16 +660,51 @@ end
 # it calls) runs in the latest world age — required for tools whose types were
 # defined after the gate loop started.
 function _serve_request(identity::Vector{UInt8}, corr_id::Vector{UInt8}, request)
-    reply = try
-        Base.invokelatest(handle_message, request)
-    catch e
-        (type = :error, message = sprint(showerror, e))
+    # Release the slot in a `finally`: a throw after handle_message used to leak
+    # it for the life of the process, and _GATE_MAX_WORKERS leaked slots stop
+    # intake entirely.
+    try
+        reply = try
+            Base.invokelatest(handle_message, request)
+        catch e
+            (type = :error, message = sprint(showerror, e))
+        end
+        io = IOBuffer()
+        try
+            serialize(io, reply)
+        catch e
+            # Still reply, or the client waits out its deadline for nothing.
+            io = IOBuffer()
+            serialize(io, (type = :error,
+                           message = "reply not serializable: $(sprint(showerror, e))"))
+        end
+        put!(_GATE_OUTBOX, (identity, corr_id, take!(io)))
+    finally
+        Threads.atomic_sub!(_GATE_INFLIGHT, 1)
     end
-    io = IOBuffer()
-    serialize(io, reply)
-    put!(_GATE_OUTBOX, (identity, corr_id, take!(io)))
-    Threads.atomic_sub!(_GATE_INFLIGHT, 1)
     return nothing
+end
+
+# ── ZMQ error classification for the owner loop ───────────────────────────────
+# ZMQ.jl raises StateError for every recv errno other than EAGAIN, carrying only
+# the strerror text. EINTR (a signal landed during the recv) is transient and the
+# socket is fine; ETERM and ENOTSOCK mean it will never deliver again. Build the
+# comparison text with the same zmq_strerror ZMQ.jl used, so it matches.
+_zmq_errno_msg(errno::Integer) = unsafe_string(ZMQ.lib.zmq_strerror(Cint(errno)))
+
+"""
+    _zmq_error_disposition(e::ZMQ.StateError) -> :retry | :restart
+
+`:retry` for EINTR (reissue on the same socket); `:restart` for ETERM, ENOTSOCK
+and anything unrecognised (hand the loop to `_supervise_message_loop`, which
+probes the socket, rebinds it if dead and respawns the loop).
+"""
+function _zmq_error_disposition(e::ZMQ.StateError)
+    msg = String(e.msg)
+    if msg == _zmq_errno_msg(Base.Libc.EINTR) || occursin("Interrupted system call", msg)
+        return :retry
+    end
+    return :restart
 end
 
 function message_loop(socket::ZMQ.Socket)
@@ -721,17 +756,27 @@ function message_loop(socket::ZMQ.Socket)
             Threads.atomic_add!(_GATE_INFLIGHT, 1)
             Threads.@spawn _serve_request(identity, corr_id, request)
         catch e
-            if !_RUNNING[]
-                break  # Clean shutdown
-            end
+            _RUNNING[] || break   # clean shutdown
             # Timeout is expected — just loop to check _RUNNING and drain outbox.
-            if e isa ZMQ.TimeoutError
-                continue
+            e isa ZMQ.TimeoutError && continue
+            if e isa ZMQ.StateError
+                if _zmq_error_disposition(e) === :retry
+                    # EINTR: a signal (SIGCHLD from a child, SIGUSR1 from a backtrace
+                    # request) landed during the recv. The socket is fine.
+                    @debug "Kaimon gate message loop: transient ZMQ error, retrying" exception = e
+                    continue
+                end
+                # The socket or context is unusable: rethrow to the supervisor, which
+                # rebinds and respawns. A `break` here left the gate bound and
+                # _RUNNING but deaf for the rest of the process.
+                @warn "Kaimon gate ROUTER socket unusable; leaving message_loop for the supervisor" exception = e
+                rethrow()
             end
-            if e isa ZMQ.StateError || e isa EOFError
-                break
+            if e isa EOFError
+                @warn "Kaimon gate message loop hit EOF; leaving message_loop for the supervisor" exception = e
+                rethrow()
             end
-            @debug "Gate message loop error" exception = e
+            @warn "Kaimon gate message loop error (continuing)" exception = (e, catch_backtrace()) maxlog = 20
         end
     end
 
