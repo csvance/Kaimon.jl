@@ -34,49 +34,56 @@ function _drain_outbox!()
 end
 
 @testset "_serve_request releases its slot and always replies" begin
-    _drain_outbox!()
-    base = KG._GATE_INFLIGHT[]
-    id, cid = UInt8[1, 2], UInt8[3, 4]
+    # A session, because handling a request bumps the per-session message and ping counters.
+    saved = KG._SESSION[]
+    KG._SESSION[] = KG.GateSession(; running = true)
+    try
+        _drain_outbox!()
+        base = KG._GATE_INFLIGHT[]
+        id, cid = UInt8[1, 2], UInt8[3, 4]
 
-    # Normal path: a ping is handled, replied to, and the slot comes back.
-    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
-    KG._serve_request(id, cid, (type = :ping,))
-    @test KG._GATE_INFLIGHT[] == base
-    (rid, rcid, bytes) = take!(KG._GATE_OUTBOX)
-    @test rid == id && rcid == cid
-    @test deserialize(IOBuffer(bytes)).type === :pong
+        # Normal path: a ping is handled, replied to, and the slot comes back.
+        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        KG._serve_request(id, cid, (type = :ping,))
+        @test KG._GATE_INFLIGHT[] == base
+        (rid, rcid, bytes) = take!(KG._GATE_OUTBOX)
+        @test rid == id && rcid == cid
+        @test deserialize(IOBuffer(bytes)).type === :pong
+        @test KG._ping_count() == 1        # counted against this session, not a global
 
-    # handle_message cannot dispatch a non-NamedTuple: error reply, slot released.
-    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
-    KG._serve_request(id, cid, Dict(:type => :ping))
-    @test KG._GATE_INFLIGHT[] == base
-    reply = deserialize(IOBuffer(take!(KG._GATE_OUTBOX)[3]))
-    @test reply.type === :error
+        # handle_message cannot dispatch a non-NamedTuple: error reply, slot released.
+        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        KG._serve_request(id, cid, Dict(:type => :ping))
+        @test KG._GATE_INFLIGHT[] == base
+        reply = deserialize(IOBuffer(take!(KG._GATE_OUTBOX)[3]))
+        @test reply.type === :error
 
-    # An unknown request type is still a reply, not a leaked slot.
-    Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
-    KG._serve_request(id, cid, (type = :no_such_message,))
-    @test KG._GATE_INFLIGHT[] == base
-    @test isready(KG._GATE_OUTBOX)
-    _drain_outbox!()
+        # An unknown request type is still a reply, not a leaked slot.
+        Threads.atomic_add!(KG._GATE_INFLIGHT, 1)
+        KG._serve_request(id, cid, (type = :no_such_message,))
+        @test KG._GATE_INFLIGHT[] == base
+        @test isready(KG._GATE_OUTBOX)
+        _drain_outbox!()
+    finally
+        KG._SESSION[] = saved
+    end
 end
 
 # ── Supervisor lifecycle gate ─────────────────────────────────────────────────
 # stop, restart, :shutdown and :restart each clear _running() and may raise
-# _SHUTTING_DOWN or _RESTARTING first; the supervisor must stand down on any of them.
+# `shutting_down` or `restarting` first; the supervisor must stand down on any of them.
 
 @testset "_gate_should_run honours every lifecycle flag" begin
-    saved = (KG._SESSION[], KG._SHUTTING_DOWN[], KG._RESTARTING[])
+    saved = KG._SESSION[]     # all three flags live on the session, so this restores them all
     try
         # A session with no sockets is enough: the supervisor only reads flags.
         KG._SESSION[] = KG.GateSession(; running = true)
-        KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = false
         @test KG._gate_should_run()
-        KG._SHUTTING_DOWN[] = true
+        KG._shutting_down!(true)
         @test !KG._gate_should_run()
-        KG._SHUTTING_DOWN[] = false; KG._RESTARTING[] = true
+        KG._shutting_down!(false); KG._restarting!(true)
         @test !KG._gate_should_run()
-        KG._RESTARTING[] = false; KG._running!(false)
+        KG._restarting!(false); KG._running!(false)
         @test !KG._gate_should_run()
         # Dropping the session is the other way to stop being runnable, and it is the one
         # _cleanup uses.
@@ -91,7 +98,7 @@ end
         end
         @test t < 2.0
     finally
-        KG._SESSION[], KG._SHUTTING_DOWN[], KG._RESTARTING[] = saved
+        KG._SESSION[] = saved
     end
 end
 

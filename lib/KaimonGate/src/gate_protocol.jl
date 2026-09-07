@@ -354,7 +354,7 @@ function handle_message(request::NamedTuple)
     end
 
     msg_type = get(request, :type, :unknown)
-    _MSG_COUNT[] += 1
+    _msg_count!(_msg_count() + 1)
 
     if msg_type == :eval
         code = get(request, :code, "")
@@ -426,13 +426,13 @@ function handle_message(request::NamedTuple)
         isempty(path) && return (type = :error, message = "path required")
         return set_tty!(path)
     elseif msg_type == :ping
-        _PING_COUNT[] += 1
-        _LAST_PING_TIME[] = time()
+        _ping_count!(_ping_count() + 1)
+        _last_ping_time!(time())
         _kv = try; _VERSION_PROVIDER[](); catch; "unknown"; end
         return (
             type = :pong,
             pid = getpid(),
-            uptime = time() - _START_TIME[],
+            uptime = time() - _start_time(),
             julia_version = string(VERSION),
             protocol_version = PROTOCOL_VERSION,
             kaimon_version = _kv,
@@ -539,7 +539,7 @@ function handle_message(request::NamedTuple)
         tool_meta = [_reflect_tool(t) for t in _SESSION_TOOLS[]]
         return (type = :tools, tools = tool_meta)
     elseif msg_type == :shutdown
-        _SHUTTING_DOWN[] = true
+        _shutting_down!(true)
         _running!(false)
         return (type = :ok, message = "shutting down")
     elseif msg_type == :restart
@@ -553,12 +553,12 @@ function handle_message(request::NamedTuple)
         # Signal the message-loop task's `finally` block to skip _cleanup().
         # We need the ZMQ sockets to stay open for ~0.3 s so the :ok reply
         # above actually reaches the client before we tear down the process.
-        _RESTARTING[] = true
+        _restarting!(true)
         _running!(false)
 
         @async begin
             sleep(0.3)  # Let ZMQ reply flush through IPC buffer
-            _RESTARTING[] = false
+            _restarting!(false)
             # Cleanup is BEST-EFFORT: a teardown hiccup (e.g. the broadcaster
             # wait under a busy/loaded process) must NOT abort the restart —
             # otherwise we'd drop the user to a shell instead of relaunching.

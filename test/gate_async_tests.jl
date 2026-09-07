@@ -7,14 +7,21 @@ using Serialization
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Temporarily replace _SESSION_TOOLS[], restore on exit."""
+"""Run `f` with `tools` registered on a synthetic session, restoring both on exit.
+
+The session is needed because handling any request bumps the per-session message counter, so
+`handle_message` no longer works against module state alone."""
 function with_tools(f, tools)
-    original = Kaimon.KaimonGate._SESSION_TOOLS[]
-    Kaimon.KaimonGate._SESSION_TOOLS[] = tools
+    KG = Kaimon.KaimonGate
+    original = KG._SESSION_TOOLS[]
+    saved_session = KG._SESSION[]
+    KG._SESSION[] = KG.GateSession(; running = true, tools = tools)
+    KG._SESSION_TOOLS[] = tools
     try
         f()
     finally
-        Kaimon.KaimonGate._SESSION_TOOLS[] = original
+        KG._SESSION_TOOLS[] = original
+        KG._SESSION[] = saved_session
     end
 end
 
@@ -212,6 +219,9 @@ end
 @testset "Gate TCP auth" begin
     orig_mode = Kaimon.KaimonGate._MODE[]
     orig_token = Kaimon.KaimonGate._AUTH_TOKEN[]
+    # handle_message counts every message against the session, so it needs one to exist.
+    orig_session = Kaimon.KaimonGate._SESSION[]
+    Kaimon.KaimonGate._SESSION[] = Kaimon.KaimonGate.GateSession(; running = true)
 
     @testset "IPC mode skips auth" begin
         Kaimon.KaimonGate._MODE[] = :ipc
@@ -262,6 +272,7 @@ end
 
     Kaimon.KaimonGate._MODE[] = orig_mode
     Kaimon.KaimonGate._AUTH_TOKEN[] = orig_token
+    Kaimon.KaimonGate._SESSION[] = orig_session
 end
 
 # ─────────────────────────────────────────────────────────────────────────────

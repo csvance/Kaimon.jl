@@ -184,19 +184,14 @@ end
 # ── :shutdown ─────────────────────────────────────────────────────────────────
 
 @testset ":shutdown" begin
-    # :shutdown marks the session not-running and raises _SHUTTING_DOWN, so it needs a session
-    # to write to. with_gate_state supplies one and takes it away again.
-    orig_shutting = KaimonGate._SHUTTING_DOWN[]
-    try
-        with_gate_state(running=true) do
-            resp = KaimonGate.handle_message((type=:shutdown,))
-            @test resp.type == :ok
-            @test occursin("shutting down", resp.message)
-            @test KaimonGate._SHUTTING_DOWN[] == true
-            @test KaimonGate._running() == false
-        end
-    finally
-        KaimonGate._SHUTTING_DOWN[] = orig_shutting
+    # Both flags :shutdown touches now live on the session, so with_gate_state dropping it
+    # is the whole restore — there is nothing left to save by hand.
+    with_gate_state(running=true) do
+        resp = KaimonGate.handle_message((type=:shutdown,))
+        @test resp.type == :ok
+        @test occursin("shutting down", resp.message)
+        @test KaimonGate._shutting_down() == true
+        @test KaimonGate._running() == false
     end
 end
 

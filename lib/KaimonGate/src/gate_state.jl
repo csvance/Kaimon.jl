@@ -192,7 +192,6 @@ const _GATE_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)
 const _STREAM_SOCKET = Ref{Union{ZMQ.Socket,Nothing}}(nothing)  # PUB for streaming output
 const _STREAM_ENDPOINT = Ref{String}("")                       # resolved PUB endpoint
 const _SESSION_ID = Ref{String}("")
-const _START_TIME = Ref{Float64}(0.0)
 const _MIRROR_REPL = Ref{Bool}(false)
 const _ALLOW_MIRROR = Ref{Bool}(true)
 const _REVISE_WATCHER_TASK = Ref{Union{Task,Nothing}}(nothing)
@@ -214,21 +213,11 @@ const _TCP_HOST = Ref{String}("127.0.0.1")
 const _TCP_PORT = Ref{Int}(0)          # actual bound port (resolved from ephemeral)
 const _TCP_STREAM_PORT = Ref{Int}(0)   # actual bound PUB port
 const _AUTH_TOKEN = Ref{String}("")  # non-empty = require token on TCP requests
-const _PING_COUNT = Ref{Int}(0)
-const _MSG_COUNT = Ref{Int}(0)       # total messages handled (pings + evals + tool calls + ...)
-const _LAST_PING_TIME = Ref{Float64}(0.0)
 const _GATE_TTY_PATH = Ref{Union{String,Nothing}}(nothing)
 const _GATE_TTY_SIZE =
     Ref{Union{Nothing,NamedTuple{(:rows, :cols),Tuple{Int,Int}}}}(nothing)
 const _GATE_TTY_ECHO_DISABLED = Ref{Bool}(false)
 const _GATE_TTY_PARKED_PGRP = Ref{Union{Int32,Nothing}}(nothing)
-# Set to true between the :restart reply and the actual execvp call.
-# Prevents the message-loop task's `finally` from closing sockets prematurely
-# and defeating the 0.3 s grace period for the ZMQ reply to flush.
-const _RESTARTING = Ref{Bool}(false)
-# Set by :shutdown handler so the message loop's `finally` block knows
-# to call _cleanup() after the reply has been sent and the loop exits.
-const _SHUTTING_DOWN = Ref{Bool}(false)
 const _ON_SHUTDOWN = Ref{Any}(nothing)
 
 # ── ROUTER request channel (protocol v2) ─────────────────────────────────────

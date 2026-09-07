@@ -316,7 +316,7 @@ function _serve(;
     # Checked here rather than at each bind so an over-long cache dir fails before
     # any socket exists, not between the two. Mode is already Windows-coerced.
     mode === :ipc && _check_ipc_path_length(sid)
-    _START_TIME[] = time()
+    start_time = time()
     _MIRROR_REPL[] = if allow_mirror
         try
             _MIRROR_PREF_PROVIDER[]()
@@ -471,7 +471,7 @@ function _serve(;
         tcp_stream_port = _TCP_STREAM_PORT[], auth_token = _AUTH_TOKEN[],
         local_tcp_coerced = _LOCAL_TCP_COERCED[], allow_mirror = _ALLOW_MIRROR[],
         allow_restart = _ALLOW_RESTART[], mirror_repl = _MIRROR_REPL[],
-        start_time = _START_TIME[],
+        start_time = start_time,
         context = _GATE_CONTEXT[], socket = _GATE_SOCKET[],
         stream_socket = _STREAM_SOCKET[], stream_endpoint = _STREAM_ENDPOINT[],
         curve_enabled = _CURVE_ENABLED[], curve_allow_any = _CURVE_ALLOW_ANY[],
@@ -504,9 +504,9 @@ function _serve(;
             # supervisor itself failing.
             @error "Kaimon gate supervisor task exited" exception = (e, catch_backtrace())
         finally
-            if _SHUTTING_DOWN[]
+            if _shutting_down()
                 # Remote shutdown: run optional cleanup hook, then exit
-                _SHUTTING_DOWN[] = false
+                _shutting_down!(false)
                 hook = _ON_SHUTDOWN[]
                 if hook !== nothing
                     try
@@ -628,7 +628,7 @@ end
 # It used to be spawned once with its exit swallowed at @debug, so one EINTR
 # silenced a gate for the rest of the process.
 
-_gate_should_run() = _running() && !_SHUTTING_DOWN[] && !_RESTARTING[]
+_gate_should_run() = _running() && !_shutting_down() && !_restarting()
 
 # sleep(s) that returns early when the gate is asked to stop, so a backoff never
 # holds up stop()/restart(), which wait on the gate task.
@@ -790,7 +790,7 @@ function restart()
     proj = dirname(something(Base.active_project(), "."))
 
     # Tell the message-loop's finally block to skip cleanup — we handle it here.
-    _RESTARTING[] = true
+    _restarting!(true)
     _running!(false)
 
     # Wait for the message-loop task to exit before tearing down sockets,
@@ -803,7 +803,7 @@ function restart()
         end
     end
 
-    _RESTARTING[] = false
+    _restarting!(false)
     # Best-effort cleanup — never let a teardown hiccup abort the restart.
     try
         _cleanup()
@@ -890,9 +890,6 @@ function _cleanup()
     _STREAM_SOCKET[] = nothing
     _STREAM_ENDPOINT[] = ""
     _AUTH_TOKEN[] = ""
-    _PING_COUNT[] = 0
-    _MSG_COUNT[] = 0
-    _LAST_PING_TIME[] = 0.0
     _SERVICE_SOCKET[] = nothing
     _GATE_CONTEXT[] = nothing
 
@@ -901,8 +898,8 @@ function _cleanup()
 
     _GATE_TASK[] = nothing
     _running!(false)
-    _RESTARTING[] = false
-    _SHUTTING_DOWN[] = false
+    _restarting!(false)
+    _shutting_down!(false)
     _MIRROR_REPL[] = false
     _ALLOW_MIRROR[] = true
     _ALLOW_RESTART[] = true
@@ -926,7 +923,7 @@ Print current gate status.
 """
 function status()
     if _running()
-        uptime = time() - _START_TIME[]
+        uptime = time() - _start_time()
         mins = round(Int, uptime / 60)
         sock = _GATE_SOCKET[]
         rep_ep = sock !== nothing ? rstrip(ZMQ._get_last_endpoint(sock), '\0') : "unknown"
@@ -939,8 +936,8 @@ function status()
         println("  PUB:       $(_STREAM_ENDPOINT[])")
         println("  Mirror:    $(_MIRROR_REPL[])")
         println("  Tools:     $(length(_SESSION_TOOLS[]))")
-        println("  Pings:     $(_PING_COUNT[])$(  _LAST_PING_TIME[] > 0 ? " (last $(round(Int, time() - _LAST_PING_TIME[]))s ago)" : "")")
-        println("  Messages:  $(_MSG_COUNT[])")
+        println("  Pings:     $(_ping_count())$(  _last_ping_time() > 0 ? " (last $(round(Int, time() - _last_ping_time()))s ago)" : "")")
+        println("  Messages:  $(_msg_count())")
         if _MODE[] == :tcp
             auth = isempty(_AUTH_TOKEN[]) ? "none (lax)" : "token"
             println("  Auth:      $auth")
