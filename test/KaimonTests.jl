@@ -6,6 +6,7 @@ using ReTest
 include("security_tests.jl")
 include("server_tests.jl")
 include("session_tests.jl")
+include("notification_delivery_tests.jl")
 include("call_tool_tests.jl")
 include("reflection_tools_tests.jl")
 include("generate_tests.jl")

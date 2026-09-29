@@ -306,6 +306,8 @@ function get_or_create_session(session_id::Union{String,Nothing}, is_initialize:
                     # capability-gated features (elicitation, …) still work for a
                     # client that reconnects without re-initializing.
                     _restore_session_caps!(session, persisted_sessions[session_id])
+                    # It may have missed list changes while the server had forgotten it.
+                    _reset_notification_cursor!(session.id)
                     STANDALONE_SESSIONS[session.id] = session
                     register_persisted_session(session.id)  # Update last_seen
                     @info "Restored session from persistence file" session_id = session.id
@@ -323,6 +325,9 @@ function get_or_create_session(session_id::Union{String,Nothing}, is_initialize:
                     # invented: an empty set leaves capability checks permissive, so a prompt
                     # is attempted anyway and a client that cannot receive one fails fast.
                     # Copying another session's capabilities would only mis-attribute them.
+                    # A reaped session lands here (the reaper prunes its persisted record
+                    # too), so it gets the whole board again, as a restored one does.
+                    _reset_notification_cursor!(session.id)
                     STANDALONE_SESSIONS[session.id] = session
                     register_persisted_session(session.id)
                     @warn "Accepted unknown session ID (client did not re-initialize)" session_id =
@@ -381,21 +386,28 @@ to deliver to connected clients.
 The board keeps the LATEST notification per method, each tagged with a global
 monotonic sequence number assigned at queue time. It is NOT drained on delivery —
 it's bounded (one entry per method) and every consumer instead advances its OWN
-cursor (the highest seq it has delivered), keyed by Mcp-Session-Id and shared
-between a session's GET receive stream and its POST-response flushes.
+cursor (the highest seq it has delivered), keyed by Mcp-Session-Id AND channel.
 
 This is what lets a REPEAT notification through: re-queuing `tools/list_changed`
 (e.g. every time the slate extension restarts) assigns a fresh, higher seq, so a
 long-lived GET stream sees it as new and re-delivers it — instead of suppressing
 it forever after the first (the old method-name dedup, which forced a manual
-`/mcp` reconnect to resync). Delivering all entries with `seq > cursor` and
-advancing the cursor to the max also means a POST flush can't steal a notification
-out from under a concurrent GET stream (they share the cursor, so at most a
-harmless duplicate — never a miss)."""
+`/mcp` reconnect to resync).
+
+A session's GET receive stream (`:stream`) and its POST responses (`:post`) keep
+SEPARATE cursors. They once shared one, on the theory that whichever channel
+delivered first had delivered it. But a server write succeeding says nothing
+about the client reading it: a GET stream the client has stopped reading (idle,
+half-closed, or bound to an id the client no longer treats as live) still takes
+every notification, and with one cursor every later POST found nothing new. The
+client then never heard `tools/list_changed` until the user ran `/mcp`. With a
+cursor per channel, a client that reads both hears each change twice, which is
+harmless (it refetches `tools/list`); one that reads only its POSTs still hears
+it."""
 const _PENDING_NOTIFICATIONS = Dict{String,Tuple{Int,Dict{String,Any}}}()  # method => (seq, notif)
 const _PENDING_NOTIFICATIONS_LOCK = ReentrantLock()
 const _NOTIF_SEQ = Ref{Int}(0)                          # global monotonic sequence
-const _SESSION_NOTIF_CURSOR = Dict{String,Int}()        # sid => highest seq delivered
+const _SESSION_NOTIF_CURSOR = Dict{Tuple{String,Symbol},Int}()  # (sid, channel) => highest seq delivered
 
 function _queue_notification!(notif::Dict{String,Any})
     lock(_PENDING_NOTIFICATIONS_LOCK) do
@@ -404,21 +416,37 @@ function _queue_notification!(notif::Dict{String,Any})
     end
 end
 
-"""Notifications newer than session `sid`'s cursor, in seq order, advancing the
-cursor past them. Shared by the GET receive stream (each poll tick) and POST
-response flushes so a session gets each notification version at most once,
-regardless of which path carries it. Empty sid → no delivery (an anonymous
-stream has no stable cursor to track)."""
-function _flush_notifications_for_session!(sid::AbstractString)::Vector{Dict{String,Any}}
+"""Notifications newer than session `sid`'s cursor on `channel`, in seq order,
+advancing that cursor past them. `channel` is `:post` for a POST response (the
+default) or `:stream` for the GET receive stream; see the board's docstring for
+why the two never share a cursor. Empty sid → no delivery (an anonymous stream has
+no stable cursor to track)."""
+function _flush_notifications_for_session!(
+    sid::AbstractString;
+    channel::Symbol = :post,
+)::Vector{Dict{String,Any}}
     isempty(sid) && return Dict{String,Any}[]
     lock(_PENDING_NOTIFICATIONS_LOCK) do
         isempty(_PENDING_NOTIFICATIONS) && return Dict{String,Any}[]
-        cursor = get(_SESSION_NOTIF_CURSOR, String(sid), 0)
+        key = (String(sid), channel)
+        cursor = get(_SESSION_NOTIF_CURSOR, key, 0)
         due = sort!([sn for sn in values(_PENDING_NOTIFICATIONS) if sn[1] > cursor]; by = first)
         isempty(due) && return Dict{String,Any}[]
-        _SESSION_NOTIF_CURSOR[String(sid)] = due[end][1]
+        _SESSION_NOTIF_CURSOR[key] = due[end][1]
         return Dict{String,Any}[n for (_, n) in due]
     end
+end
+
+"""Forget session `sid`'s POST cursor, so its next POST response carries the whole
+board again. For a session coming back after the server forgot it (reaped as
+idle, or from before a restart): whatever it heard earlier, it may have missed
+what changed while it was away, and a repeat is harmless where a miss is not. The
+GET stream's cursor is left alone; that stream has been running all along."""
+function _reset_notification_cursor!(sid::AbstractString)
+    lock(_PENDING_NOTIFICATIONS_LOCK) do
+        delete!(_SESSION_NOTIF_CURSOR, (String(sid), :post))
+    end
+    return nothing
 end
 
 """Drop all pending notifications AND per-session cursors. Called on server
@@ -888,9 +916,8 @@ function _handle_gate_tool_sse(
     progress_token = _resolve_progress_token(request, tool_name_str)
 
     # ── Flush pending notifications (e.g., resource/tool list changes) ────
-    # Only those newer than this session's cursor (shared with its GET stream),
-    # so we don't re-announce the same change on every tool call now that the
-    # board isn't drained.
+    # Only those newer than this session's POST cursor, so we don't re-announce the
+    # same change on every tool call now that the board isn't drained.
     for notif in _flush_notifications_for_session!(session === nothing ? "" : session.id)
         try
             notif_json = JSON.json(notif)
@@ -1069,6 +1096,16 @@ function _handle_gate_tool_sse(
         _persist_tool_complete!(db_request_id, tcr)
     catch e
         _push_log!(:warn, "Failed to push tool result for TUI: $(sprint(showerror, e))")
+    end
+
+    # ── Flush what the call itself caused ─────────────────────────────────
+    # The flush above ran before the tool did, so it cannot carry a change the tool
+    # made: the `ex` that loads a package whose extension registers tools is exactly
+    # that case. Deliver it here, ahead of the result, rather than leave it for a
+    # next POST that may not come before the agent looks for the new tools.
+    for notif in _flush_notifications_for_session!(session === nothing ? "" : session.id)
+        _push_log!(:info, "SSE notification flush: $(get(notif, "method", ""))")
+        send_sse_event(notif)
     end
 
     # Send final JSON-RPC result as last SSE event
@@ -1301,10 +1338,10 @@ function start_mcp_server(
             response = handler(req_with_body)
 
             # Check for pending notifications (e.g. tools/list_changed from extensions).
-            # If any are newer than this session's cursor, upgrade this response to SSE
-            # so we can send both the notifications and the JSON-RPC result as separate
-            # events. (Shared cursor with the session's GET/tool-call streams — see
-            # `_flush_notifications_for_session!`.)
+            # If any are newer than this session's POST cursor, upgrade this response to
+            # SSE so we can send both the notifications and the JSON-RPC result as
+            # separate events. (The cursor is shared with the session's tool-call
+            # streams but NOT its GET receive stream; see the board's docstring.)
             pending = _flush_notifications_for_session!(session !== nothing ? session.id : "")
 
             if !isempty(pending)

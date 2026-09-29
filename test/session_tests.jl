@@ -192,6 +192,21 @@ _session_ts(ago::Period) = format(now() - ago, "yyyy-mm-dd\\THH:MM:SS")
         sid2 = "notif-sid2-$(rand(UInt32))"
         @test any(n -> n["method"] == m, Kaimon._flush_notifications_for_session!(sid2))
 
+        # The GET stream and the POST channel keep separate cursors: a delivery on the
+        # stream (which the client may not be reading) must not stop the next POST.
+        sid3 = "notif-sid3-$(rand(UInt32))"
+        @test any(n -> n["method"] == m,
+            Kaimon._flush_notifications_for_session!(sid3; channel = :stream))
+        @test any(n -> n["method"] == m, Kaimon._flush_notifications_for_session!(sid3))
+        @test !any(n -> n["method"] == m, Kaimon._flush_notifications_for_session!(sid3))
+
+        # A session coming back after the server forgot it gets the board again on POST,
+        # while its stream's cursor is left where it was.
+        Kaimon._reset_notification_cursor!(sid3)
+        @test any(n -> n["method"] == m, Kaimon._flush_notifications_for_session!(sid3))
+        @test !any(n -> n["method"] == m,
+            Kaimon._flush_notifications_for_session!(sid3; channel = :stream))
+
         # Empty sid is anonymous (no stable cursor) → never delivered.
         @test isempty(Kaimon._flush_notifications_for_session!(""))
     end
