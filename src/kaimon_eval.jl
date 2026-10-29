@@ -16,174 +16,6 @@ Base.display(d::IOBufferDisplay, mime::MIME, x) = show(d.io, mime, x)
 Base.display(d::IOBufferDisplay, mime, x) = show(d.io, mime, x)
 
 """
-    _serialize_expr(expr) -> String
-
-Serialize a (possibly-modified) AST back to valid Julia code.
-`Base.parse_input_line` wraps multi-line code in `:toplevel`, and
-`string(Expr(:toplevel, ...))` / `string(Expr(:using, ...))` etc. fall back
-to `\$(Expr(...))` (the quoted representation), injecting literal `\$` that
-corrupts the code. This function uses `show_unquoted` which renders
-expressions as valid Julia source without quoting artifacts.
-"""
-function _serialize_expr(expr)
-    if expr isa Expr && expr.head == :toplevel
-        parts = String[]
-        for arg in expr.args
-            arg isa LineNumberNode && continue
-            # Recursively handle nested :toplevel exprs (produced by
-            # Base.parse_input_line for multi-statement code)
-            if arg isa Expr && arg.head == :toplevel
-                s = _serialize_expr(arg)
-                !isempty(s) && push!(parts, s)
-            else
-                push!(parts, sprint(Base.show_unquoted, arg, 0, 0))
-            end
-        end
-        return join(parts, "\n")
-    else
-        return sprint(Base.show_unquoted, expr, 0, 0)
-    end
-end
-
-"""Match a `Revise.revise()` / `Main.Revise.revise()` call (by callee; args
-ignored). The gate replays Revise's `revise_first` ast-transform before every
-eval, so an explicit call is always a redundant no-op — we strip it from agent
-code like `println`, so it never clutters the user's mirrored REPL."""
-function _is_revise_revise_call(func)
-    (func isa Expr && func.head == :. && length(func.args) >= 2) || return false
-    (func.args[end] isa QuoteNode && func.args[end].value == :revise) || return false
-    base = func.args[1]
-    base === :Revise && return true
-    return base isa Expr && base.head == :. && length(base.args) >= 2 &&
-           base.args[end] isa QuoteNode && base.args[end].value == :Revise
-end
-
-"""
-    remove_println_calls(expr, toplevel=true, strip_show=true, was_stripped=Ref(false))
-
-Strip println, print, printstyled, @show, logging macros, and redundant
-`Revise.revise()` calls from an AST expression.
-When quiet mode is on, agents shouldn't use these to communicate since
-the user already sees code execution in their REPL.
-
-Logging macros (@error, @debug, @info, @warn) are only removed at the top level,
-not inside function definitions or other nested code.
-
-Returns the modified expression and sets was_stripped[] = true if any output functions were removed.
-"""
-function remove_println_calls(
-    expr,
-    toplevel::Bool = true,
-    strip_show::Bool = true,
-    was_stripped::Ref{Bool} = Ref(false),
-)
-    if expr isa Expr
-        # Check if this is a print-related call
-        if expr.head == :call
-            func = expr.args[1]
-            # Strip redundant Revise.revise() — the gate replays Revise's
-            # `revise_first` ast-transform before every eval, so an explicit call
-            # is always a no-op that only clutters the mirrored REPL.
-            if _is_revise_revise_call(func)
-                return nothing
-            end
-            # List of functions to remove (always, regardless of level)
-            print_funcs = [:println, :print, :printstyled]
-            # Check if this is a print call targeting stdout (no IO arg)
-            # vs an IO-targeted call like println(io, ...) which should be kept
-            func_name = if func in print_funcs
-                func
-            elseif (
-                func isa Expr &&
-                func.head == :. &&
-                length(func.args) >= 2 &&
-                func.args[end] isa QuoteNode &&
-                func.args[end].value in print_funcs
-            )
-                func.args[end].value
-            else
-                nothing
-            end
-            if func_name !== nothing
-                # Only strip stdout-targeted calls:
-                # - println("msg"), print("a", "b"), printstyled("x", color=:red)
-                # - Explicit stdout: println(stdout, "msg")
-                # Keep IO-targeted calls: println(io, "msg"), print(buf, "data")
-                #
-                # Heuristic: IO-targeted iff first positional arg is a variable
-                # (Symbol) that isn't stdout/stderr. This correctly handles keyword
-                # args in printstyled and multi-arg print to stdout.
-                pos_args = [
-                    a for a in expr.args[2:end] if
-                    !(a isa Expr && a.head in (:kw, :parameters))
-                ]
-                first_pos = length(pos_args) >= 1 ? pos_args[1] : nothing
-                is_io_targeted =
-                    length(pos_args) >= 2 &&
-                    first_pos isa Symbol &&
-                    first_pos ∉ (:stdout, :stderr)
-                if !is_io_targeted
-                    was_stripped[] = true
-                    return nothing
-                end
-                # IO-targeted print call — keep it
-            end
-        elseif expr.head == :macrocall
-            macro_name = expr.args[1]
-            # Remove @show conditionally based on strip_show parameter
-            if strip_show && macro_name == Symbol("@show")
-                was_stripped[] = true
-                return nothing
-            end
-            # Remove logging macros ONLY at top level
-            if toplevel
-                logging_macros =
-                    [Symbol("@error"), Symbol("@debug"), Symbol("@info"), Symbol("@warn")]
-                if macro_name in logging_macros
-                    was_stripped[] = true
-                    return nothing
-                end
-                # Also handle qualified logging macros
-                if (
-                    macro_name isa Expr &&
-                    macro_name.head == :. &&
-                    length(macro_name.args) >= 2 &&
-                    macro_name.args[end] isa QuoteNode &&
-                    macro_name.args[end].value in [:error, :debug, :info, :warn]
-                )
-                    was_stripped[] = true
-                    return nothing
-                end
-            end
-        end
-
-        # Determine if we're entering a nested scope (not top level anymore)
-        entering_nested = expr.head in [:function, :macro, :let, :do, :try, :->]
-
-        # Recursively process all arguments, filtering out nothings
-        new_args = []
-        for arg in expr.args
-            cleaned = remove_println_calls(
-                arg,
-                toplevel && !entering_nested,
-                strip_show,
-                was_stripped,
-            )
-            if cleaned !== nothing
-                push!(new_args, cleaned)
-            end
-        end
-        # If we have a block and removed some statements, rebuild it
-        if expr.head == :block && length(new_args) != length(expr.args)
-            return Expr(expr.head, new_args...)
-        else
-            return Expr(expr.head, new_args...)
-        end
-    end
-    return expr
-end
-
-"""
     truncate_output(output::String, max_length::Int, value=nothing)
 
 Intelligently truncate output if it exceeds max_length.
@@ -290,17 +122,16 @@ function execute_repllike(
         # In non-quiet mode, show return value unless they added a semicolon
         show_return_value = !quiet && !REPL.ends_with_semicolon(str)
 
+        # Remove agent print/@show/logging calls at the configured level (print_strip.jl).
+        str, stripped = strip_agent_output(str; quiet = quiet)
+        was_stripped = Ref(stripped)
+
         # Auto-append semicolon in quiet mode to suppress output
         if quiet && !REPL.ends_with_semicolon(str)
             str = str * ";"
         end
 
         expr = Base.parse_input_line(str)
-
-        # Always strip println (it's never appropriate for agent communication)
-        # Strip @show only in quiet mode; in verbose mode (q=false), @show is useful for debugging
-        was_stripped = Ref(false)
-        expr = remove_println_calls(expr, true, quiet, was_stripped)
 
         if has_repl && !silent
             REPL.prepare_next(repl)
@@ -595,8 +426,7 @@ function execute_repllike(
 
         # Add reminder if output functions were stripped
         if was_stripped[]
-            reminder = "\n\n⚠️  Note: println/print/logging calls were removed. Use q=false with a final expression to see values."
-            result = result * reminder
+            result = result * "\n\n" * print_strip_note()
         end
 
         # Apply truncation if output exceeds max_output

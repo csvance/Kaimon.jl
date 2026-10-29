@@ -760,7 +760,7 @@ function create_handler(
                 return _rpc_notifications_initialized(request, session)
             method == "logging/setLevel" && return _rpc_logging_setlevel(request)
             method == "session/info" && return _rpc_session_info(request, session)
-            method == "tools/list" && return _rpc_tools_list(request, tools)
+            method == "tools/list" && return _rpc_tools_list(request, tools, session)
             method == "resources/list" && return _rpc_resources_list(request)
             method == "resources/read" && return _rpc_resources_read(request)
             method == "resources/templates/list" &&
@@ -1230,12 +1230,20 @@ function start_mcp_server(
                 return nothing
             end
 
+            # A request from a client speaking a newer, initialize-less MCP is turned away before a
+            # session is made for it, so it falls back to `initialize`.
+            _stream_modern_request(http, parsed_request) && return nothing
+
             is_initialize =
                 parsed_request !== nothing &&
                 get(parsed_request, "method", "") == "initialize"
 
             # Get or create session
             session, is_new_session = get_or_create_session(session_id, is_initialize)
+
+            # The tools this request's caller may use, named by the service in front (see
+            # `_allowed_tools`). Set on every request, absent or not, before anything can return.
+            _set_request_allowed!(_parse_allowed_tools(HTTP.header(req, "X-Kaimon-Allowed-Tools", nothing)))
 
             # Update activity timestamp so the reaper doesn't kill active sessions
             if session !== nothing

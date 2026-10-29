@@ -135,6 +135,24 @@ function view_config_base(m::KaimonModel, area::Rect, buf::Buffer)
         pa_status = _promote_after_label(pa)
         pa_style = pa <= 0 ? tstyle(:warning) : tstyle(:success)
         set_string!(buf, x + 4, y, "after: $pa_status", pa_style; max_x=arx)
+        y += 1
+        # Row 11: [o] Print stripping level
+        set_string!(buf, x, y, "[o]", tstyle(:accent, bold = true); max_x=arx)
+        set_string!(buf, x + 4, y, "Strip agent print output", tstyle(:text); max_x=arx)
+        y += 1
+        ps = print_strip_level()
+        ps_note = haskey(ENV, "KAIMON_PRINT_STRIP") ? " (KAIMON_PRINT_STRIP)" : ""
+        ps_style = ps === :off ? tstyle(:warning) : tstyle(:success)
+        set_string!(buf, x + 4, y, "level: $ps$ps_note", ps_style; max_x=arx)
+        y += 1
+        # Row 13: [a] Agent session sharing
+        set_string!(buf, x, y, "[a]", tstyle(:accent, bold = true); max_x=arx)
+        set_string!(buf, x + 4, y, "Agent sessions (start_session)", tstyle(:text); max_x=arx)
+        y += 1
+        as = agent_sessions_mode()
+        as_note = haskey(ENV, "KAIMON_AGENT_SESSIONS") ? " (KAIMON_AGENT_SESSIONS)" : ""
+        as_label = as === :private ? "private per agent" : "shared per project"
+        set_string!(buf, x + 4, y, "mode: $as_label$as_note", tstyle(:success); max_x=arx)
     end
 
     # ── Right column: MCP Clients (top) + Projects & TCP Gates side-by-side (bottom) ──
@@ -531,9 +549,13 @@ end
 # the key handler's bounds, and the rendered rows can't drift apart.
 const LAUNCH_CONFIG_FIELDS =
     [:threads, :gcthreads, :heap_size_hint, :sysimage, :julia_bin, :julia_version,
-     :startup_file, :extra_flags]
+     :startup_file, :instantiate, :extra_flags]
 const LAUNCH_CONFIG_LABELS = ["Threads (-t):", "GC threads:", "Heap size hint:",
-    "Sysimage (-J):", "Julia binary:", "Julia version:", "Run startup.jl:", "Extra flags:"]
+    "Sysimage (-J):", "Julia binary:", "Julia version:", "Run startup.jl:",
+    "Pkg.instantiate:", "Extra flags:"]
+
+# Values a choice row cycles through with Space. "" inherits (kaimon.toml, else the default).
+const LAUNCH_CONFIG_CHOICES = Dict(:instantiate => ["", INSTANTIATE_MODES...])
 
 function _render_launch_config_modal(m::KaimonModel, buf::Buffer, area::Rect)
     idx = m.selected_project
@@ -593,6 +615,9 @@ function _render_launch_config_modal(m::KaimonModel, buf::Buffer, area::Rect)
         if input isa Bool
             set_string!(buf, x + 2 + label_w, y, input ? "[x] yes" : "[ ] no",
                         selected ? tstyle(:accent) : tstyle(:text))
+        elseif input isa String
+            set_string!(buf, x + 2 + label_w, y, "‹ $(isempty(input) ? "default (auto)" : input) ›",
+                        selected ? tstyle(:accent) : tstyle(:text))
         else
             if selected
                 input.tick = m.tick
@@ -604,7 +629,7 @@ function _render_launch_config_modal(m::KaimonModel, buf::Buffer, area::Rect)
 
     y += 1
     if y <= bottom(inner)
-        set_string!(buf, x, y, "[Space] toggle  [Enter] Save  [Esc] Cancel", tstyle(:text_dim))
+        set_string!(buf, x, y, "[Space] toggle/cycle  [Enter] Save  [Esc] Cancel", tstyle(:text_dim))
     end
 end
 

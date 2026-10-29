@@ -136,7 +136,7 @@ function get_kaimon_test_args(func_name::Symbol)
 
         # REPL
         :execute_repllike => ("1 + 1",),
-        :remove_println_calls => (:(println("test")),),
+        :strip_agent_output => ("println(\"test\")",),
     )
     return get(args_map, func_name, nothing)
 end

@@ -78,13 +78,14 @@ The ONLY way to touch the connection. Holds `_LOCK` for the whole call and passe
 the live connection to `f(db)`. Returns `default` if the DB isn't open. `f` MUST
 materialize any query result before returning (never hand back a live cursor — it
 would be stepped outside the lock). Runs the blocking SQLite work off the interactive
-pool (see `_run_off_interactive`). Private.
+pool (see `_run_off_interactive`), and in the newest world: SQLite is loaded on first
+use, so a task started before that load can't otherwise see its methods. Private.
 """
 function _withdb(f, default = nothing)
     _run_off_interactive() do
         lock(_LOCK) do
             db = _DB[]
-            db === nothing ? default : f(db)
+            db === nothing ? default : Base.invokelatest(f, db)
         end
     end
 end
@@ -172,8 +173,7 @@ const _SCHEMA = String[
 """Open the connection and create the schema if absent. Idempotent. Returns the DB."""
 # Load SQLite, THEN run the body: `Base.require` creates its methods in a newer
 # world than this frame, so anything touching an SQLite type has to be reached
-# through `invokelatest`. Only the entry points need it — every later call runs
-# in a world that already has them.
+# through `invokelatest` — here, and in `_withdb` for every later operation.
 function init_db!(db_path::String = get_default_db_path())
     _sqlite()
     return Base.invokelatest(_init_db_impl!, db_path)
@@ -205,7 +205,7 @@ end
 """Close the connection."""
 function close_db!()
     lock(_LOCK) do
-        _DB[] !== nothing && (_sqlite().close(_DB[]); _DB[] = nothing)
+        _DB[] !== nothing && (Base.invokelatest(d -> _sqlite().close(d), _DB[]); _DB[] = nothing)
     end
     return nothing
 end

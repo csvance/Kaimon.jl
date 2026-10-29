@@ -34,7 +34,7 @@ backend_session_id(::AgentHandle) = ""
 # ── ClaudeBackend ─────────────────────────────────────────────────────────────
 
 """
-    ClaudeBackend(; model, permission_mode, allowed_tools, mcp_config, strict_mcp)
+    ClaudeBackend(; model, permission_mode, allowed_tools, mcp_config, strict_mcp, only)
 
 Drives the local `claude` CLI in headless multi-turn stream-JSON mode. Auth is the
 host's own `claude` login (subscription) — we never touch credentials. `mcp_config`
@@ -78,6 +78,38 @@ Base.@kwdef struct ClaudeBackend <: AgentBackend
     dangerously_skip::Bool = false                    # --dangerously-skip-permissions (bypass posture)
     stream::Bool = true                               # --include-partial-messages: token-by-token deltas
     effort::Union{String,Nothing} = nothing           # --effort <level>: thinking/effort level (lower = faster turns)
+    # Opened with `only`: `allowed_tools` is the agent's whole tool set. The built-in tools it names
+    # are the only ones the CLI loads (`--tools`), and Kaimon refuses its own tools it does not name
+    # (`agent_tool_refusal`). Otherwise `allowed_tools` only spares the agent a permission prompt.
+    only::Bool = false
+end
+
+"""
+    _only_builtin_tools(allowed) -> Vector{String}
+
+The CLI's built-in tools an `only` agent keeps: those `allowed` names, without any argument
+pattern (`Bash(git *)` keeps `Bash`), and `ToolSearch` when it may use MCP tools, which the CLI
+loads through it. ACP callback names (`fs/read_text_file`, from the `lab` preset) are not CLI
+tools and are left out.
+"""
+function _only_builtin_tools(allowed::AbstractVector{<:AbstractString})
+    builtin = unique!([String(first(split(t, '('))) for t in allowed
+                       if !startswith(t, "mcp__") && !occursin('/', first(split(t, '(')))])
+    any(t -> startswith(t, "mcp__"), allowed) && !("ToolSearch" in builtin) && push!(builtin, "ToolSearch")
+    return builtin
+end
+
+"""
+    _only_allows(allowed, tool) -> Bool
+
+Whether an `only` agent's `allowed` list names Kaimon tool `tool`, which arrives bare and possibly
+in its dotted canonical spelling (see `agent_tool_refusal`). Naming the whole server
+(`mcp__kaimon`) allows every Kaimon tool.
+"""
+function _only_allows(allowed::AbstractVector{<:AbstractString}, tool::AbstractString)
+    server = "mcp__$(ACP_MCP_SERVER)"
+    qualified = server * "__" * replace(String(tool), '.' => '_')
+    return any(a -> a == server || replace(a, '.' => '_') == qualified, allowed)
 end
 
 function _find_claude()
@@ -164,10 +196,14 @@ function _claude_args(b::ClaudeBackend, cwd::AbstractString)
     if !isempty(b.disallowed_tools)
         push!(args, "--disallowedTools"); append!(args, b.disallowed_tools)
     end
+    b.only && push!(args, "--tools", join(_only_builtin_tools(b.allowed_tools), ","))
     b.dangerously_skip && push!(args, "--dangerously-skip-permissions")
     if b.mcp_config !== nothing
         push!(args, "--mcp-config", b.mcp_config)
         b.strict_mcp && push!(args, "--strict-mcp-config")
+    elseif b.only
+        # No config of ours: an `only` agent gets no MCP servers rather than the user's.
+        push!(args, "--strict-mcp-config")
     end
     if b.system_prompt !== nothing && !isempty(b.system_prompt)
         push!(args, "--append-system-prompt", b.system_prompt)

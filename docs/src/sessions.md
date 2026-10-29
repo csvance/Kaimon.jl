@@ -31,29 +31,29 @@ interactive. Good for one-off connections or scripts.
 
 ### Per-project auto-connect
 
-The Config tab's onboarding flow writes a `.julia-startup.jl` file into your
-project directory. Load it with Julia's `--load=` flag and the REPL auto-connects whenever
-it launches in that directory:
+`Kaimon.Generate.create_startup_script(path)` writes a `.julia-startup.jl` file into a
+project directory, and `Kaimon.Generate.create_repl_script(path)` an executable `repl`
+launcher that loads it. Start the REPL through `./repl`, or with Julia's `--load=` flag:
 
 ```bash
-julia --load=.julia-startup.jl
+julia --project --load=.julia-startup.jl
 ```
 
-The generated file loads Revise and calls `KaimonGate.serve()`, both wrapped in
-`try/catch` so startup succeeds even when Kaimon is not running:
+The generated file loads Revise and calls `KaimonGate.serve()` when KaimonGate is available
+in the environment, so startup succeeds even when Kaimon is not running:
 
 ```julia
-# .julia-startup.jl
-try
-    using Revise
-catch e
-    @info "ℹ Revise not loaded (optional)"
-end
-try
-    using KaimonGate
-    KaimonGate.serve()
-catch e
-    @warn "KaimonGate failed to start" exception = e
+if Base.identify_package("KaimonGate") !== nothing
+    try
+        @eval using Revise
+    catch
+    end
+    try
+        @eval using KaimonGate
+        @eval KaimonGate.serve()
+    catch e
+        @warn "KaimonGate failed to start" exception = e
+    end
 end
 ```
 
@@ -80,7 +80,7 @@ start_session()
 When a managed session starts, Kaimon:
 
 1. Spawns a Julia subprocess via PTY (pseudo-terminal).
-2. Activates the project environment and runs `Pkg.instantiate`.
+2. Activates the project environment and runs `Pkg.instantiate` (see [Instantiating the environment](configuration.md#Instantiating-the-environment)).
 3. Loads Revise and calls `KaimonGate.serve(spawned_by="agent")`.
 4. Waits up to 120 seconds for the gate connection.
 
@@ -88,11 +88,17 @@ The spawned process connects back as a regular gate session. It appears in the S
 
 To configure which projects can be spawned, see [Projects Configuration](configuration.md#projects-configuration).
 
+### Private sessions
+
+By default `start_session` returns the session already running for a project, so every agent working on it shares one REPL, and its globals. Evals run concurrently, and each result says when another eval overlapped it.
+
+An agent that needs a REPL of its own passes `private=true`. It gets a session that `start_session` never hands to another agent and that automatic binding never picks for one; calling `start_session(private=true)` again returns the same session. Setting **Agent sessions** to *private* in the Config tab (`a`), or `KAIMON_AGENT_SESSIONS=private`, makes that the default for every agent.
+
+Privacy is per MCP connection. Subagents that share their parent's connection (as Claude Code's do) are one client to Kaimon, so a parent that runs subagents in parallel should call `start_session(private=true)` once per subagent and give each its own key to pass as `ses`. The user's own REPL is never private.
+
 ## Session Routing
 
-When only one session is connected, agents do not need to specify a target -- all requests are routed to the single active session automatically.
-
-When **multiple sessions** are connected, agents must specify which session to target by providing the 8-character session key. Every tool that executes code or inspects state accepts a `session` (or `ses`) parameter for this purpose:
+Every tool that executes code or inspects state accepts a `session` (or `ses`) parameter naming the session by its 8-character key:
 
 ```
 ex(e="using LinearAlgebra", ses="a3f8b2c1")
@@ -100,7 +106,7 @@ run_tests(session="a3f8b2c1")
 type_info(type_expr="Matrix{Float64}", session="a3f8b2c1")
 ```
 
-If an agent omits the session key when multiple sessions are connected, the server returns an error indicating that a session must be specified.
+When it is omitted, the call goes to the agent's **bound** session: the one it last named with `ses`, the one `start_session` returned to it, or the one matching its workspace root. `ping` marks it. An agent with no bound session falls through to the only connected session, never counting another agent's private one; with several connected, the server returns an error asking for a key.
 
 !!! note "Extension runtimes are not addressable sessions"
     Extensions connect through the Gate like a session, but they are **not** REPLs

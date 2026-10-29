@@ -161,6 +161,14 @@ mutable struct RequestChannel
     # libzmq requires to use a socket from more than one thread. wait(fdw) parks
     # OUTSIDE the lock (it's a libuv fd poll, not a socket op).
     sock_lock::ReentrantLock
+    # What the reader parks on. libzmq's fd signals only a CHANGE in the socket's state, and any
+    # operation on the socket can consume that signal, including the sender's send(): a reply that
+    # lands while a request is being sent leaves the fd quiet with the reply unread. So the reader
+    # never parks on the fd itself. The fd watcher (`_rc_fd_watch`) and the sender, after every send,
+    # notify `wake`, and the reader re-checks EVENTS on each wake. `rearm` tells the watcher the
+    # reader has read EVENTS (which resets the fd) and it may park on the fd again.
+    wake::Threads.Event
+    rearm::Threads.Event
 end
 
 # corr_id ↔ 8 bytes (little-endian, explicit so it's arch-independent on the
@@ -244,6 +252,9 @@ function _rc_sender(rc::RequestChannel)
                 # time out; the rest of the queue continues.
                 _rc_route_reply!(rc, corr_id, UInt8[])  # empty → caller sees deser error
                 @debug "RequestChannel send failed" exception = e
+            finally
+                # Any send, including a failed one, may have taken the fd's signal for a waiting reply.
+                notify(rc.wake)
             end
         end
     catch
@@ -264,32 +275,29 @@ function _rc_reader(rc::RequestChannel)
     # ONE persistent FDWatcher for the socket's whole life. `poll_fd` constructed
     # AND closed a fresh _FDWatcher on every wake — at N connected gates × 5Hz that
     # was continuous watcher create/close churn + the scheduler load it generated
-    # (a measurable slice of idle host CPU). Here we build the watcher once and
-    # block on it; disconnect closes it (see _close_request_channel!), which wakes
-    # the wait immediately so teardown no longer waits out a poll timeout. The
-    # reader is the sole owner/closer of the socket, so watching its own fd is
-    # safe (#51).
+    # (a measurable slice of idle host CPU). Here we build the watcher once and a
+    # watcher task blocks on it (`_rc_fd_watch`); disconnect closes it (see
+    # _close_request_channel!), which wakes the wait immediately so teardown no
+    # longer waits out a poll timeout. The reader is the sole owner/closer of the
+    # socket, so watching its own fd is safe (#51).
     fdw = nothing
     if fd >= 0
         fdw = try FileWatching.FDWatcher(RawFD(fd), true, false) catch; nothing end
         rc.reader_fdw = fdw
     end
+    fdw === nothing || Threads.@spawn _rc_fd_watch(rc, fdw)
     try
         while rc.alive[]
-            # Park (event-driven, zero idle CPU) on the watcher until the DEALER is
-            # readable, or it's closed on disconnect. When NOT readable we always
-            # wait — this is the guard against a busy spin. ALL socket touches
-            # (EVENTS read, recv) go under sock_lock so they never race the sender's
-            # send() on another thread (libzmq sockets aren't thread-safe);
-            # wait(fdw) stays OUTSIDE the lock (it's a libuv fd poll, not a socket op).
+            # Park (event-driven, zero idle CPU) on `wake` until the DEALER may be
+            # readable, or the channel is closed. When NOT readable we always wait —
+            # this is the guard against a busy spin. ALL socket touches (EVENTS read,
+            # recv) go under sock_lock so they never race the sender's send() on
+            # another thread (libzmq sockets aren't thread-safe).
             if fdw !== nothing && !_rc_pollin(rc, sock)
-                try
-                    wait(fdw)
-                catch
-                    # watcher closed (disconnect/teardown) or fd invalid
-                end
+                notify(rc.rearm)   # EVENTS was just read, so the fd is reset: the watcher may park on it
+                wait(rc.wake)
                 rc.alive[] || break
-                _rc_pollin(rc, sock) || continue
+                continue           # re-check EVENTS: a wake says "may be readable", not "is"
             end
             # Recv ONE reply (corr_id + payload) under the lock. Readable ⇒ recv
             # won't block; a spurious wake costs at most one rcvtimeo before TimeoutError.
@@ -323,12 +331,32 @@ function _rc_reader(rc::RequestChannel)
     finally
         rc.reader_fdw = nothing
         fdw === nothing || (try; close(fdw); catch; end)
+        notify(rc.rearm)   # release the watcher if it is waiting for the reader
         # The owning task closes the socket — never disconnect!/another task. Take
         # sock_lock so a send() in flight on the sender thread can't race the close;
         # _zmq_close! also drops the socket's weakref from ctx.sockets.
         lock(rc.sock_lock) do
             _zmq_close!(sock)
         end
+    end
+end
+
+# Forward the DEALER fd's readability signals to the reader's `wake`. After each signal it waits for the
+# reader to read EVENTS (`rearm`) before parking on the fd again: libzmq's fd stays readable until the
+# socket processes its commands, so parking straight away would spin.
+function _rc_fd_watch(rc::RequestChannel, fdw)
+    try
+        while rc.alive[]
+            try
+                wait(fdw)
+            catch
+                break   # watcher closed (disconnect/teardown) or fd invalid
+            end
+            notify(rc.wake)
+            wait(rc.rearm)
+        end
+    finally
+        notify(rc.wake)   # let a parked reader observe alive = false
     end
 end
 
@@ -355,6 +383,8 @@ function RequestChannel(ctx::ZMQ.Context, endpoint::String; curve!::Function = i
         Ref(true),
         nothing,   # reader_fdw — created by _rc_reader
         ReentrantLock(),  # sock_lock — serializes DEALER access across sender/reader threads
+        Threads.Event(true),   # wake
+        Threads.Event(true),   # rearm
     )
     rc.sender = Threads.@spawn _rc_sender(rc)
     rc.reader = Threads.@spawn _rc_reader(rc)
@@ -366,12 +396,14 @@ so they return immediately instead of waiting out their timeout, and let the
 reader close the DEALER. Safe to call more than once."""
 function _close_request_channel!(rc::RequestChannel)
     rc.alive[] = false
-    # Wake the reader if it's parked on its persistent FDWatcher — closing the
-    # watcher makes its `wait` return, so the reader observes alive=false and tears
-    # down immediately instead of waiting out a poll timeout.
+    # Wake the reader and its fd watcher so both observe alive=false and tear down
+    # immediately instead of waiting out a poll timeout: closing the watcher ends
+    # the fd wait, and the events release whichever of them is parked on one.
     let fdw = rc.reader_fdw
         fdw === nothing || (try; close(fdw); catch; end)
     end
+    notify(rc.wake)
+    notify(rc.rearm)
     try
         close(rc.send_q)   # unblocks the sender's `for … in send_q`
     catch

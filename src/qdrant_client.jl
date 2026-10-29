@@ -21,6 +21,12 @@ function set_url(url::String)
     QDRANT_URL[] = url
 end
 
+# Every POST used here (search, scroll, count, delete by id or filter) is safe to repeat,
+# so let HTTP.jl retry it as it would a GET. Otherwise a pooled keep-alive connection
+# that Qdrant closed while idle fails the request with ECONNRESET instead of reconnecting.
+_post(path::AbstractString, body) = HTTP.post("$(QDRANT_URL[])$path",
+    ["Content-Type" => "application/json"], JSON.json(body); retry_non_idempotent = true)
+
 """
     list_collections() -> Vector{String}
 
@@ -93,11 +99,7 @@ function search(
             body["filter"] = filter
         end
 
-        response = HTTP.post(
-            "$(QDRANT_URL[])/collections/$(collection)/points/search",
-            ["Content-Type" => "application/json"],
-            JSON.json(body),
-        )
+        response = _post("/collections/$(collection)/points/search", body)
 
         data = JSON.parse(String(response.body))
         return get(data, "result", [])
@@ -155,11 +157,7 @@ function scroll_points(collection::String; limit::Int = 10, offset = nothing, wi
             body["offset"] = offset isa Integer ? offset : string(offset)
         end
 
-        response = HTTP.post(
-            "$(QDRANT_URL[])/collections/$(collection)/points/scroll",
-            ["Content-Type" => "application/json"],
-            JSON.json(body),
-        )
+        response = _post("/collections/$(collection)/points/scroll", body)
 
         data = JSON.parse(String(response.body))
         return get(data, "result", Dict())
@@ -327,11 +325,7 @@ function delete_points(collection::String, point_ids::AbstractVector)
     isempty(point_ids) && return true
     try
         body = Dict("points" => map(_coerce_point_id, point_ids))
-        response = HTTP.post(
-            "$(QDRANT_URL[])/collections/$(collection)/points/delete",
-            ["Content-Type" => "application/json"],
-            JSON.json(body),
-        )
+        response = _post("/collections/$(collection)/points/delete", body)
         data = JSON.parse(String(response.body))
         return get(data, "status", "") == "ok"
     catch e
@@ -365,11 +359,7 @@ function delete_by_filter(collection::String, filter::Dict)
     try
         body = Dict("filter" => filter)
 
-        response = HTTP.post(
-            "$(QDRANT_URL[])/collections/$(collection)/points/delete",
-            ["Content-Type" => "application/json"],
-            JSON.json(body),
-        )
+        response = _post("/collections/$(collection)/points/delete", body)
 
         data = JSON.parse(String(response.body))
         return get(data, "status", "") == "ok"
@@ -410,11 +400,7 @@ function count_by_file(collection::String, file_path::String)
             Dict("must" => [Dict("key" => "file", "match" => Dict("value" => file_path))])
         body = Dict("filter" => filter, "exact" => true)
 
-        response = HTTP.post(
-            "$(QDRANT_URL[])/collections/$(collection)/points/count",
-            ["Content-Type" => "application/json"],
-            JSON.json(body),
-        )
+        response = _post("/collections/$(collection)/points/count", body)
 
         data = JSON.parse(String(response.body))
         return get(get(data, "result", Dict()), "count", 0)

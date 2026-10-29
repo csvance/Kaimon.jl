@@ -28,12 +28,8 @@ using Kaimon
         ]
         @test F.add_chunks!(rows) == 3
 
-        # The lexical index is a process-global single connection. A background
-        # FTS-coverage backfill (`_spawn_fts_coverage_sync!` → `backfill_fts!`,
-        # armed by an earlier test's gate-services startup) can fire mid-suite and
-        # write real-collection chunks through that shared connection — landing in
-        # THIS test's temp DB. So assert on the collections this test owns, never
-        # the process-global `coverage().total`.
+        # The lexical index is a process-global single connection, so count only the
+        # collections this test owns rather than the process-global `coverage().total`.
         ccount(c) = sum(p.n for p in F.coverage().collections if p.collection == c; init = 0)
 
         @testset "exact identifier found by content" begin

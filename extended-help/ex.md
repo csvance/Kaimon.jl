@@ -34,14 +34,14 @@ ex(e="typeof([1,2,3])", q=false)            # Returns: "Vector{Int64}"
 
 **This is equivalent to automatically adding a semicolon!**
 
-## 🚨 CRITICAL: println is ALWAYS Stripped
+## 🚨 CRITICAL: Don't Report Through println
 
-**`println` is ALWAYS removed from the AST before execution - regardless of `q` setting.**
+**With `q=true`, `println`/`print`/`@show`/logging calls in your cell are removed before it runs.**
 
 To see values, use **`q=false`** with the value as the final expression:
 
 ```julia
-# ❌ WRONG - println is always stripped (never works for agent feedback)
+# ❌ WRONG - the println is removed, nothing comes back
 ex(e="println('Result: ', my_result)")
 
 # ✅ CORRECT - Use q=false with value as final expression
@@ -50,14 +50,21 @@ ex(e="(x, y, z)", q=false)                    # Multiple values
 ex(e="(length(data), typeof(data))", q=false) # Summary info
 ```
 
-### What gets stripped:
+### What gets removed
 
-- **Always stripped (regardless of `q`):**
-  - `println`, `print`, `printstyled` - at ALL levels (even inside functions)
-  - Top-level logging macros (`@info`, `@warn`, `@error`, `@debug`)
+The user chooses a level (Config tab `[o]`, or `KAIMON_PRINT_STRIP=off|moderate|high`). A note in
+the result tells you when anything was removed.
 
-- **Stripped only with `q=true`:**
-  - `@show` macro (available with `q=false` for debugging)
+- **`moderate` (default):** with `q=true` only. Print calls, `@show` and logging macros that the
+  cell runs as statements. Function, macro, lambda and `do` bodies are never touched, so a function
+  you define keeps its prints. Logging macros only as the cell's own top-level statements.
+- **`high`:** print calls everywhere, including inside functions you define, whatever `q` is;
+  `@show` with `q=true`.
+- **`off`:** nothing is removed.
+
+At every level only Base's `print`/`println`/`printstyled` count (`Profile.print(io)` is kept), and
+a call writing to an IO variable (`println(io, x)`) is kept. A removed `@show x = 1` still runs
+`x = 1`. Everything else in the cell reaches the REPL exactly as written.
 
 ### Silent mode (`s=true`) affects what the user sees live
 

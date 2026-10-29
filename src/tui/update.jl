@@ -163,6 +163,8 @@ function Tachikoma.update!(m::KaimonModel, evt::MouseEvent)
                     elseif row == 6; _cycle_qdrant_prefix!(m)
                     elseif row == 8; _install_vscode_remote_control!(m)
                     elseif row == 9; begin_promote_after!(m)
+                    elseif row == 11; cycle_print_strip!(m)
+                    elseif row == 13; cycle_agent_sessions!(m)
                     end
                 end
             end
@@ -892,6 +894,8 @@ function Tachikoma.update!(m::KaimonModel, evt::KeyEvent)
             'g' => begin_global_gate!(m)
             'm' => toggle_gate_mirror_repl!(m)
             'b' => begin_promote_after!(m)
+            'o' => cycle_print_strip!(m)
+            'a' => cycle_agent_sessions!(m)
             'p' => begin_project_add!(m)
             'D' => begin_project_remove!(m)
             'e' => begin_project_edit_launch!(m)
@@ -928,7 +932,8 @@ function _handle_nav!(m::KaimonModel, evt::KeyEvent)
                     if m.selected_connection >= 1 && m.selected_connection <= length(conns)
                         conn = conns[m.selected_connection]
                         if is_agent_spawned(conn) && conn.status != :stalled
-                            ms = find_managed_session(conn.project_path)
+                            ms = something(find_managed_by_key(short_key(conn)),
+                                           find_managed_session(conn.project_path), Some(nothing))
                             ms !== nothing && _open_session_terminal!(m, ms)
                         end
                     end

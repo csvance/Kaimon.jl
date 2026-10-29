@@ -68,7 +68,7 @@ function curve_keypair()
     sec = Vector{UInt8}(undef, 41)
     rc = ZMQ.lib.zmq_curve_keypair(pub, sec)
     rc == 0 || _curve_error("zmq_curve_keypair (is libzmq built with libsodium?)")
-    return (unsafe_string(pointer(pub)), unsafe_string(pointer(sec)))
+    return GC.@preserve pub sec (unsafe_string(pointer(pub)), unsafe_string(pointer(sec)))
 end
 
 """Derive the Z85 public key for a Z85 secret key."""
@@ -79,7 +79,7 @@ function curve_public(secret::AbstractString)
         rc = ZMQ.lib.zmq_curve_public(pub, pointer(sec))
         rc == 0 || _curve_error("zmq_curve_public")
     end
-    return unsafe_string(pointer(pub))
+    return GC.@preserve pub unsafe_string(pointer(pub))
 end
 
 """Z85-encode a 32-byte binary key (e.g. the client key from a ZAP request) to its
@@ -92,7 +92,7 @@ function _z85_encode(bin::AbstractVector{UInt8})
         p = ZMQ.lib.zmq_z85_encode(dest, pointer(src), length(src))
         p == C_NULL && _curve_error("zmq_z85_encode")
     end
-    return unsafe_string(pointer(dest))
+    return GC.@preserve dest unsafe_string(pointer(dest))
 end
 
 # ── Apply CURVE role to a socket (BEFORE bind/connect) ─────────────────────────

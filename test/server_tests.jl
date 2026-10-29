@@ -4,6 +4,7 @@ using Kaimon: MCPTool
 using HTTP
 using JSON
 using Dates
+using Sockets
 
 # Create test tools
 time_tool =
@@ -81,6 +82,44 @@ end
 
     finally
         # Always stop server
+        Kaimon.stop_mcp_server(server)
+        sleep(0.1)
+    end
+end
+
+@testset "Requests in a newer, initialize-less MCP are turned away" begin
+    # MCP 2026-07-28 has no `initialize`: a client that speaks it and the older versions sends a
+    # new-style request first and falls back to `initialize` on a 400 whose error is not one of
+    # 2026-07-28's own (-32020 to -32022).
+    server = Kaimon.start_mcp_server(server_tools, 0)
+    port = server.port
+    sleep(0.1)
+    post(body; headers = String[]) = HTTP.post("http://localhost:$port/",
+        ["Content-Type" => "application/json", headers...], JSON.json(body); status_exception = false)
+    rpc(method; id = 7, meta = nothing) = (p = Dict{String,Any}();
+        meta === nothing || (p["_meta"] = meta);
+        Dict("jsonrpc" => "2.0", "id" => id, "method" => method, "params" => p))
+    # `String(r.body)` empties the byte vector, so each body is read once.
+    reply(r) = (r.status, JSON.parse(String(r.body)))
+    turned_away(r) = ((s, j) = reply(r); s == 400 && j.error.code == -32600)
+    try
+        @test turned_away(post(rpc("tools/list"); headers = ["MCP-Protocol-Version" => "2026-07-28"]))
+        s, j = reply(post(rpc("server/discover"; id = 42)))
+        @test s == 400 && j.error.code == -32600
+        @test j.id == 42
+        @test occursin("initialize", j.error.message)
+        @test turned_away(post(rpc("tools/list";
+            meta = Dict("io.modelcontextprotocol/protocolVersion" => "2026-07-28"))))
+
+        # The versions this server speaks are unaffected, with or without the `_meta` field.
+        @test post(rpc("tools/list";
+            meta = Dict("io.modelcontextprotocol/protocolVersion" => "2025-11-25"))).status == 200
+        @test post(rpc("tools/list")).status == 200
+        init = Dict("jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => Dict(
+            "protocolVersion" => "2025-11-25", "capabilities" => Dict(),
+            "clientInfo" => Dict("name" => "test", "version" => "0")))
+        @test post(init).status == 200
+    finally
         Kaimon.stop_mcp_server(server)
         sleep(0.1)
     end
@@ -271,6 +310,63 @@ end
         @test haskey(JSON.parse(String(r3.body)).result, "tools")
 
     finally
+        Kaimon.stop_mcp_server(server)
+        sleep(0.1)
+    end
+end
+
+# Open a raw GET SSE stream for `sid` and return the socket once the stream is idle:
+# past the response head and the `roots/list` request every new stream sends. A client
+# that leaves before that request would be caught by its write, not by the keepalive.
+function _open_sse(port, sid)
+    sock = Sockets.connect(Sockets.localhost, port)
+    write(sock, "GET /mcp HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n" *
+                "Mcp-Session-Id: $sid\r\n\r\n")
+    head = readuntil(sock, "\r\n\r\n")
+    @test occursin("200", first(split(head, "\r\n")))
+    @test occursin("roots/list", readuntil(sock, "roots/list"; keep = true))
+    return sock
+end
+
+_stream_registered(sid) = lock(() -> haskey(Kaimon._SESSION_OUTBOX, sid), Kaimon._SESSION_OUTBOX_LOCK)
+
+@testset "SSE GET stream ends when the client goes away" begin
+    server = Kaimon.start_mcp_server(server_tools, 0)
+    saved = Kaimon._SSE_KEEPALIVE_SECS[]
+    Kaimon._SSE_KEEPALIVE_SECS[] = 0.5
+    try
+        # A client that disconnects: the keepalive write fails and the loop unregisters.
+        sid = "sse-gone-$(rand(UInt32))"
+        sock = _open_sse(server.port, sid)
+        @test timedwait(() -> _stream_registered(sid), 5.0) === :ok
+        close(sock)
+        @test timedwait(() -> !_stream_registered(sid), 15.0) === :ok
+        # ...and HTTP.jl then closes the server side of the connection.
+        @test timedwait(() -> isempty(HTTP._server_conns(server.server)), 5.0) === :ok
+
+        # A stream replaced by a newer one for the same session ends its response (the
+        # chunked terminator arrives; the connection itself stays keep-alive).
+        sid2 = "sse-replaced-$(rand(UInt32))"
+        first_sock = _open_sse(server.port, sid2)
+        @test timedwait(() -> _stream_registered(sid2), 5.0) === :ok
+        second_sock = _open_sse(server.port, sid2)
+        body = IOBuffer()
+        ended = Threads.Atomic{Bool}(false)
+        @async try
+            while !eof(first_sock)
+                write(body, readavailable(first_sock))
+                endswith(String(copy(body.data[1:body.size])), "0\r\n\r\n") && break
+            end
+        catch
+        finally
+            ended[] = true
+        end
+        @test timedwait(() -> ended[], 15.0) === :ok
+        @test _stream_registered(sid2)          # the newer stream still owns the session
+        close(second_sock)
+        close(first_sock)
+    finally
+        Kaimon._SSE_KEEPALIVE_SECS[] = saved
         Kaimon.stop_mcp_server(server)
         sleep(0.1)
     end

@@ -68,7 +68,7 @@ run `sync_index` silently. Results are logged to the TUI server log.
 Skips if a reindex is already in progress for this project.
 """
 function _trigger_background_reindex(project_path::String, render_mode::Bool = false)
-    render_mode && return
+    (render_mode || !code_indexing()) && return
     # Skip if project_path is empty or would result in "default" collection
     if isempty(project_path) || project_path == "/"
         return
@@ -144,6 +144,7 @@ Called by gate auto-connect (with Project.toml guard) and by approved-project
 indexing at startup (no guard needed — user already approved it).
 """
 function _auto_index_project!(project_path::String)
+    code_indexing() || return
     # Concurrent guard — skip if already reindexing this project
     already_running = lock(_REINDEX_LOCK) do
         if project_path in _REINDEX_IN_PROGRESS

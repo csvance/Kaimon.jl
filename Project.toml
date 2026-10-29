@@ -1,7 +1,7 @@
 name = "Kaimon"
 uuid = "d3856c55-31fd-4246-b7e8-380411123c01"
 keywords = ["mcp", "ai", "agents", "llm", "julia", "repl", "code-execution", "debugging"]
-version = "2.9.0"
+version = "2.10.2"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 description = "MCP (Model Context Protocol) server for Julia — gives AI agents full access to Julia's runtime for code execution, introspection, debugging, testing, and semantic code search"
 
@@ -9,6 +9,7 @@ description = "MCP (Model Context Protocol) server for Julia — gives AI agents
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
+CoverageTools = "c36e975a-824b-4404-a568-ef97ca766997"
 DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
@@ -46,6 +47,9 @@ ripgrep_jll = "e10fc14b-37cd-5cbc-b289-ad01b12ebaad"
 PDFIO = "4d0d745f-9d9a-592e-8d18-1ad8a0f42b92"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 
+[sources]
+KaimonGate = {path = "lib/KaimonGate"}
+
 [extensions]
 KaimonPDFIOExt = "PDFIO"
 
@@ -54,6 +58,7 @@ Aqua = "0.8"
 Base64 = "1.11.0"
 ColorTypes = "0.12"
 CommonMark = "1.0.1"
+CoverageTools = "1.4"
 DBInterface = "2.6.1"
 DataFrames = "1.8.1"
 Dates = "1.10"
@@ -85,7 +90,7 @@ Serialization = "1.11.0"
 Sockets = "1.11.0"
 Supposition = "0.3.5"
 TOML = "1.0"
-Tachikoma = "2.7"
+Tachikoma = "2.8"
 Test = "1.10"
 UUIDs = "1.11.0"
 ZMQ = "1"

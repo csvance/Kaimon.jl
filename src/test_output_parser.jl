@@ -62,7 +62,7 @@ mutable struct TestRun
     julia_version::String         # Julia the suite actually ran on — reported, because a run
                                   # on a different Julia than the developer uses resolves the
                                   # test environment differently and must never be invisible
-    manifest_name::String         # manifest Julia read (`Manifest-v1.12.toml`, or `temp`)
+    manifest_name::String         # manifest Julia read (`Manifest-v1.12.toml`), or `extras-built`/`extras-reused`
     env_error::String             # test environment could not be resolved; the suite never ran
     julia_requested::String       # `[launch] julia_version` the project asked for, if any.
                                   # Compared against what actually ran, so a substituted Julia
@@ -605,6 +605,15 @@ function _parse_summary_line!(run::TestRun, state::_ParserState, line::String)::
     return false
 end
 
+# The runner reports a project without test/Project.toml by how its [extras]/[targets] env
+# was obtained; anything else is the manifest file it read.
+const _EXTRAS_ENV_LABELS = Dict(
+    "extras-built" => "env from [extras]/[targets], built for this run and kept for the next",
+    "extras-reused" => "env from [extras]/[targets], reused (rebuilt when Project.toml changes)",
+    "extras-temp" => "temporary env from [extras]/[targets]",
+)
+_manifest_label(name::AbstractString) = get(_EXTRAS_ENV_LABELS, name, name)
+
 """Parse key=value pairs from a structured line."""
 function _parse_kv(line::AbstractString)::Dict{String,String}
     d = Dict{String,String}()
@@ -654,7 +663,7 @@ function format_test_summary(run::TestRun)::String
 
     if !isempty(run.julia_version)
         line = "Julia: $(run.julia_version)"
-        isempty(run.manifest_name) || (line *= " | Manifest: $(run.manifest_name)")
+        isempty(run.manifest_name) || (line *= " | Manifest: $(_manifest_label(run.manifest_name))")
         println(buf, line)
     end
 

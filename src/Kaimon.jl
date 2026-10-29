@@ -18,6 +18,7 @@ using FileWatching
 using Preferences
 using ZMQ
 import ripgrep_jll   # bundled ripgrep binary backing grep_code (system `rg` is the fallback)
+import CoverageTools # run_tests coverage: the same per-line accounting LocalCoverage/Coverage.jl report
 using CommonMark  # triggers Tachikoma's TachikomaMarkdownExt for markdown rendering
 using Printf
 using UUIDs
@@ -60,7 +61,11 @@ function kaimon_cache_dir()
     # Append "kaimon" under XDG_CACHE_HOME rather than using it verbatim, so we
     # get our own subdir instead of scattering kaimon.db/sock/sessions.json into
     # the shared cache root. Mirrors kaimon_config_dir's (correct) handling. (#42)
-    dir = if Sys.iswindows()
+    # `KAIMON_CACHE_DIR` names the directory itself (see `kaimon_config_dir`).
+    explicit = get(ENV, "KAIMON_CACHE_DIR", "")
+    dir = if !isempty(explicit)
+        explicit
+    elseif Sys.iswindows()
         joinpath(
             get(ENV, "LOCALAPPDATA", joinpath(homedir(), "AppData", "Local")),
             "Kaimon",
@@ -84,7 +89,13 @@ Respects `XDG_CONFIG_HOME` on Unix; uses `APPDATA` on Windows.
 Defaults to `~/.config/kaimon`.
 """
 function kaimon_config_dir()
-    dir = if Sys.iswindows()
+    # `KAIMON_CONFIG_DIR` (and `KAIMON_CACHE_DIR`) name the directories themselves, for a Kaimon
+    # embedded in another service beside one the same person runs: its own config, keys, sockets,
+    # sessions and logs, without changing XDG_* for everything else the process starts.
+    explicit = get(ENV, "KAIMON_CONFIG_DIR", "")
+    dir = if !isempty(explicit)
+        explicit
+    elseif Sys.iswindows()
         joinpath(
             get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")),
             "Kaimon",
@@ -184,6 +195,7 @@ include("qdrant_hybrid.jl")   # hybrid (semantic+lexical RRF) impl behind qdrant
 include("grep_code.jl")       # exact-pattern (ripgrep) search behind grep_code
 include("edit_code.jl")       # scoped, validated bulk edit — grep_code's write side
 include("rename_symbol.jl")   # identifier-aware rename, on the token stream not on text
+include("print_strip.jl")     # removes agent print/@show/logging calls from submitted code
 # Qdrant indexer, split from the former monolithic qdrant_indexer.jl. Order
 # follows the original (config/consts first, then cache, discovery, chunking,
 # indexing, revise hook).

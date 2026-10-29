@@ -282,6 +282,10 @@ function trigger_backtrace(conn::REPLConnection)::Union{String,Nothing}
     # Windows has neither those signals nor `kill(2)` — a bare `ccall(:kill,…)` there throws
     # (no such symbol), so the peek feature is simply unavailable on Windows.
     Sys.iswindows() && return nothing
+    # A remote gate's pid names a process on ANOTHER machine: signalling it here would reach whatever
+    # local process has that number, and SIGUSR1 ends a process that does not handle it.
+    (_is_tcp(conn) && !_is_local_tcp(conn)) && return nothing
+    conn.pid > 0 || return nothing
     bt_path = joinpath(KaimonGate.sock_dir(), "$(conn.session_id)-backtrace.txt")
     # Remove stale file from previous trigger
     rm(bt_path; force=true)
@@ -289,7 +293,8 @@ function trigger_backtrace(conn::REPLConnection)::Union{String,Nothing}
     sig = Sys.isbsd() ? 29 : 10
     ret = ccall(:kill, Cint, (Cint, Cint), conn.pid, sig)
     if ret != 0
-        @debug "kill() failed" pid=conn.pid sig errno=Base.Libc.errno()
+        err = Base.Libc.errno()           # before anything else can overwrite it
+        @debug "kill() failed" pid=conn.pid sig errno=err
         return nothing
     end
     # Poll for the file (profile peek takes ~1s by default + write time)

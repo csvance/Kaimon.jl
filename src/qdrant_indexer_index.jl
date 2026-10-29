@@ -916,6 +916,7 @@ startup auto-indexing settles first. Called from BOTH startup paths — the TUI
 share a single init. Errors are non-fatal and logged.
 """
 function _spawn_fts_coverage_sync!(; delay::Real = 8)
+    code_indexing() || return nothing
     return Threads.@spawn begin
         try
             sleep(delay)

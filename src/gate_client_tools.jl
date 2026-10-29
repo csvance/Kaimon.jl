@@ -139,6 +139,26 @@ function _declared_timeout_ms(tool_meta::Dict)
     return (parsed === nothing || parsed <= 0) ? nothing : Int(round(parsed))
 end
 
+"Whether `conn`'s gate process is known to have exited: a local one (IPC, or TCP on this machine) with a PID that is not alive."
+_process_gone(conn::REPLConnection) = (!_is_tcp(conn) || _is_local_tcp(conn)) && conn.pid > 0 && !_is_pid_alive(conn.pid)
+
+"""
+    _gate_callable(conn; wait_s = 10.0) -> Bool
+
+Whether a tool call can go to `conn`'s gate. One still connecting is waited for, up to `wait_s`
+seconds. A stalled one (busy, as a process often is just after it starts, compiling) is sent the
+call, which it answers once it is free, as any request to it is — unless its process has exited,
+which would leave the call waiting out its whole timeout.
+"""
+function _gate_callable(conn::REPLConnection; wait_s::Real = 10.0)
+    deadline = time() + wait_s
+    while conn.status == :connecting && time() < deadline
+        sleep(0.1)
+    end
+    conn.status == :stalled && _process_gone(conn) && return false
+    return conn.status in (:connected, :evaluating, :stalled) && conn.req_channel !== nothing
+end
+
 """
     _call_session_tool(conn, tool_name, args; timeout_ms=nothing) -> String
 
@@ -151,9 +171,7 @@ the tool's declared budget when it has one.
 """
 function _call_session_tool(conn::REPLConnection, tool_name::String, args::Dict;
                             timeout_ms::Union{Nothing,Real} = nothing)
-    if conn.status ∉ (:connected, :evaluating) || conn.req_channel === nothing
-        return "Error: Gate not connected (session=$(conn.session_id))"
-    end
+    _gate_callable(conn) || return "Error: Gate not connected (session=$(conn.session_id), status=$(conn.status))"
 
     # Caller identity: the invoking agent's Mcp-Session-Id, set as a task-local by
     # the MCP server around tool dispatch (empty for a self/nested call). The owning
@@ -207,9 +225,7 @@ function _call_session_tool_async(
     timeout_ms::Union{Nothing,Real} = nothing,
     on_progress::Union{Function,Nothing} = nothing,
 )
-    if conn.status ∉ (:connected, :evaluating) || conn.req_channel === nothing
-        return "Error: Gate not connected (session=$(conn.session_id))"
-    end
+    _gate_callable(conn) || return "Error: Gate not connected (session=$(conn.session_id), status=$(conn.status))"
 
     # Generate a unique request ID to correlate response with this caller
     request_id = bytes2hex(rand(UInt8, 8))
@@ -427,6 +443,26 @@ connection, the old connection is evicted instead of deduplicating.
 function _resolve_namespace!(conn::REPLConnection, mgr::ConnectionManager)
     base_ns = conn.namespace
     isempty(base_ns) && return base_ns
+
+    # A session of this namespace whose process has gone (the one this replaces after a restart,
+    # not reaped yet) gives the namespace up now, with its tools: otherwise the new session would
+    # take a suffixed one, and reaping the old later would take the shared prefix's tools with it.
+    gone = lock(mgr.lock) do
+        [c for c in mgr.connections if c !== conn && c.namespace == base_ns && _process_gone(c)]
+    end
+    for old in gone
+        _push_log!(:info, "$(base_ns): $(short_key(conn)) replaces $(short_key(old)), whose process has gone")
+        lock(mgr.lock) do
+            _unregister_session_tools!(old)
+            disconnect!(old)
+            idx = findfirst(c -> c === old, mgr.connections)
+            if idx !== nothing
+                _remove_session_files(mgr.sock_dir, old.session_id)
+                deleteat!(mgr.connections, idx)
+            end
+        end
+    end
+    isempty(gone) || _fire_sessions_changed(mgr)
 
     # Find colliding connections
     colliders = lock(mgr.lock) do

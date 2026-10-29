@@ -24,6 +24,7 @@ using SafeTestsets
 @safetestset "Capture race" include("src/test_capture_race.jl")
 @safetestset "Stream guard" include("src/test_stream_guard.jl")
 @safetestset "Concurrent eval" include("src/test_eval_concurrency.jl")
+@safetestset "Request id forwarding" include("src/test_request_id_forwarding.jl")
 @safetestset "Debug breakpoint" include("src/test_debug.jl")
 @safetestset "ZMQ integration" include("src/test_integration.jl")
 @safetestset "CURVE transport" include("src/test_curve.jl")

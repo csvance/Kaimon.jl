@@ -111,10 +111,10 @@ writes, and returned diff as `edit_code`.
 
 **User sees everything you execute in real-time.** You share the same REPL.
 
-**println/print to stdout are always stripped.** To see a value, use `q=false` with the value as the final expression:
+**Don't report through `println`/`print`/`@show`.** With `q=true` they are removed from the cell before it runs. To see a value, use `q=false` with the value as the final expression:
 
 ```julia
-# WRONG - println to stdout is stripped
+# WRONG - the println is removed, nothing comes back
 ex(e="println(x)")
 
 # CORRECT - Use q=false with final expression

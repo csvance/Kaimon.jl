@@ -16,7 +16,7 @@ pkg_add_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["packages"],
@@ -38,7 +38,7 @@ pkg_rm_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["packages"],

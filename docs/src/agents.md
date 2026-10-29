@@ -100,7 +100,7 @@ extensions via the service endpoint. Returns are JSON strings.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `agent_open` | `cwd` (req), `model`, `effort`, `permission`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `mcp_config`, `system_prompt`, `id` | `{"agent_id": "<id>"}` -- spawns & owns the process |
+| `agent_open` | `cwd` (req), `model`, `effort`, `permission`, `permission_mode`, `allowed_tools`, `only`, `disallowed_tools`, `mcp_config`, `system_prompt`, `id` | `{"agent_id": "<id>"}` -- spawns & owns the process |
 | `agent_send` | `agent_id` (req), `text` (req) | `{"turn": <n>}` -- writes a user turn (async); events stream on `agent:<id>` |
 | `agent_run` | `agent_id` (req), `text` (req), `timeout` | `{"text": "…"}` -- sends a turn and **blocks** until it ends, returning the assistant text |
 | `agent_output` | `agent_id` (req), `turn`, `which` ("last_message"/"full_turn"/"all"), `include_tools`, `max_chars` | `{agent_id, turn, status, done, text, truncated, dropped_chars, usage}` -- **non-blocking** read of an agent's output (partial while still working). Pair with `agent_send` to dispatch-then-poll instead of blocking on `agent_run` |
@@ -120,6 +120,7 @@ extensions via the service endpoint. Returns are JSON strings.
 | `permission` | `default` | Permission **preset** (see below): `default \| notebook \| specialist \| lab \| auto \| bypass`. |
 | `permission_mode` | *(from preset)* | Override the preset's raw claude permission-mode: `default \| acceptEdits \| plan \| auto \| bypassPermissions`. |
 | `allowed_tools` | `[]` | Extra tool allowlist. Composes with the preset. |
+| `only` | `false` | Claude CLI agents: make `allowed_tools` the agent's whole tool set. The CLI loads only the built-in tools it names (plus `ToolSearch` when it names MCP tools) and no MCP server but Kaimon's, and Kaimon hides and refuses every Kaimon tool it does not name. Without it, `allowed_tools` only spares the agent permission prompts. ACP agents get the same effect from the `specialist` preset. See [Restricting a claude agent to its tools](@ref). |
 | `disallowed_tools` | the `agent_*` tools | Tools the agent may **not** call. Defaults to a recursion guard (see below). Pass `[]` to allow nested agents. |
 | `mcp_config` | `null` | Path to an `--mcp-config` JSON pointing the agent at the live Kaimon MCP, so it can call `slate.*` / `ex` / extension tools. |
 | `system_prompt` | `null` | Instructions/context appended to the agent's system prompt (applies to every turn). |
@@ -141,6 +142,19 @@ on regardless.
 
 An explicit `permission_mode` overrides the preset's mode. `allowed_tools` composes
 with the preset's allowlist, except under `specialist`, where it replaces it.
+
+### Restricting a claude agent to its tools
+
+`only = true` holds a claude CLI agent to `allowed_tools`, with these limits:
+
+- An argument pattern restricts through permission prompts, not through the tool set:
+  `Bash(git *)` loads all of `Bash`, so under the `auto` or `bypass` presets (or
+  `permission_mode = "bypassPermissions"`) any command runs.
+- Preset allowances are part of the list. `notebook` and `lab` allow the whole Kaimon
+  server, so `only` cannot narrow Kaimon's tools under them; use `default` or `specialist`.
+- Kaimon tells the agent's calls apart by a header in the MCP config it generates, so
+  `only` refuses a caller-supplied `mcp_config`, and refuses to start an agent that names
+  MCP tools before the Kaimon server's port is known.
 
 A preset's **deny** half applies at Kaimon's own `tools/call` door for every backend, so
 `mcp__kaimon` entries -- the recursion guard included -- always hold. Its reach into the

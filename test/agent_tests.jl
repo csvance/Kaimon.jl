@@ -1,6 +1,9 @@
 using ReTest
 using Kaimon
 
+# An agent handle that is never driven: for a session whose policy alone is under test.
+struct OnlyTestHandle <: Kaimon.AgentHandle end
+
 # Replay a sequence of stream-JSON objects through the mapper, collecting every emitted
 # ACP event (mirrors what _start_reader! does line-by-line). Shares one session_id Ref.
 function _agent_map_seq(objs)
@@ -242,6 +245,120 @@ end
         @test !("--include-partial-messages" in off)
         # streaming is on by default
         @test "--include-partial-messages" in Kaimon._claude_args(Kaimon.ClaudeBackend(), ".")
+    end
+
+    @testset "ClaudeBackend: `only` makes allowed_tools the whole tool set" begin
+        allowed = ["Read", "Bash(git *)", "mcp__kaimon__notes_search", "mcp__kaimon__slate_dbg.frame"]
+        tools_flag(b) = (args = Kaimon._claude_args(b, "."); i = findfirst(==("--tools"), args);
+                         i === nothing ? nothing : args[i+1])
+        # Built-ins: only those named, without argument patterns, and ToolSearch to reach MCP tools.
+        @test tools_flag(Kaimon.ClaudeBackend(; allowed_tools = allowed, only = true)) == "Read,Bash,ToolSearch"
+        @test tools_flag(Kaimon.ClaudeBackend(; allowed_tools = ["Read", "Write"], only = true)) == "Read,Write"
+        @test tools_flag(Kaimon.ClaudeBackend(; only = true)) == ""          # nothing named: no built-ins
+        @test tools_flag(Kaimon.ClaudeBackend(; allowed_tools = allowed)) === nothing
+        # Kaimon's tools: only those named, in either spelling, or all when the server is named.
+        @test Kaimon._only_allows(allowed, "notes_search")
+        @test Kaimon._only_allows(allowed, "slate_dbg.frame") && Kaimon._only_allows(allowed, "slate_dbg_frame")
+        @test !Kaimon._only_allows(allowed, "ex") && Kaimon._only_allows(["mcp__kaimon"], "ex")
+
+        # Refused at tools/call for the agent that was given them, and only for it.
+        aid = "only-test-agent"
+        s = Kaimon.AgentSession(aid, Kaimon.ClaudeBackend(; allowed_tools = allowed, only = true), OnlyTestHandle(),
+                                ".", "opus", :idle, Task(() -> nothing), time(), time(), Kaimon.ACP.Usage(),
+                                Any[], String[], String[], ReentrantLock())
+        lock(Kaimon.AGENT_SESSIONS_LOCK) do; Kaimon.AGENT_SESSIONS[aid] = s; end
+        try
+            @test Kaimon.agent_tool_refusal(aid, "notes_search") === nothing
+            @test occursin("not among the tools", Kaimon.agent_tool_refusal(aid, "ex"))
+            s.backend = Kaimon.ClaudeBackend(; allowed_tools = allowed)
+            @test Kaimon.agent_tool_refusal(aid, "ex") === nothing        # without `only`, as before
+        finally
+            lock(Kaimon.AGENT_SESSIONS_LOCK) do; delete!(Kaimon.AGENT_SESSIONS, aid); end
+        end
+        @test_throws ErrorException Kaimon.agent_open(; cwd = ".", model = "acp:opencode", only = true)
+
+        # ACP callback names from the `lab` preset are not CLI tools.
+        @test Kaimon._only_builtin_tools(["Read", "fs/read_text_file", "mcp__kaimon__ex"]) == ["Read", "ToolSearch"]
+        # Without a config of Kaimon's, an `only` agent gets no MCP servers rather than the user's.
+        args = Kaimon._claude_args(Kaimon.ClaudeBackend(; only = true), ".")
+        @test "--strict-mcp-config" in args && !("--mcp-config" in args)
+        @test !("--strict-mcp-config" in Kaimon._claude_args(Kaimon.ClaudeBackend(), "."))
+        # A config without Kaimon's agent header would leave the agent's calls unattributable.
+        @test_throws ErrorException Kaimon.agent_open(; cwd = ".", only = true, mcp_config = "/tmp/x.json",
+                                                      allowed_tools = ["Read"])
+        port = Kaimon.MCP_SERVER_PORT[]
+        Kaimon.MCP_SERVER_PORT[] = 0
+        try
+            @test_throws ErrorException Kaimon.agent_open(; cwd = ".", only = true,
+                                                          allowed_tools = ["mcp__kaimon__ex"])
+        finally
+            Kaimon.MCP_SERVER_PORT[] = port
+        end
+    end
+
+    @testset "an embedded Kaimon: its own directories, extensions and tools per caller" begin
+        # Its own directories, named outright.
+        d = mktempdir()
+        withenv("KAIMON_CACHE_DIR" => joinpath(d, "c"), "KAIMON_CONFIG_DIR" => joinpath(d, "f")) do
+            @test Kaimon.kaimon_cache_dir() == joinpath(d, "c") && Kaimon.kaimon_config_dir() == joinpath(d, "f")
+            @test Kaimon._tui_log_path() == joinpath(d, "c", "server.log")
+            @test Kaimon.KaimonGate.sock_dir() == joinpath(d, "c", "sock")
+            # It reaps only its own extensions: those marked with its id, not the default Kaimon's.
+            id = Kaimon._instance_id()
+            @test Kaimon._is_this_instance(id) && !Kaimon._is_this_instance(nothing) && !Kaimon._is_this_instance("0123456789ab")
+        end
+        withenv("KAIMON_CACHE_DIR" => nothing) do
+            @test Kaimon._is_this_instance(nothing)              # unmarked: started before the markers, the default's
+            cmd(inst) = "julia -e spawned_by=\"extension\" namespace=\\\"slate\\\" " * (inst === nothing ? "" : "kaimon_instance=$inst")
+            @test Kaimon._extension_cmdline_matches(cmd(Kaimon._instance_id()), "slate")
+            @test Kaimon._extension_cmdline_matches(cmd(nothing), "slate")
+            @test !Kaimon._extension_cmdline_matches(cmd("0123456789ab"), "slate")
+        end
+        # It indexes no code: it shares a Qdrant it must leave alone.
+        withenv("KAIMON_CODE_INDEX" => "0") do
+            @test !Kaimon.code_indexing()
+            @test Kaimon._spawn_fts_coverage_sync!(; delay = 0) === nothing
+            @test Kaimon._auto_index_project!(pkgdir(Kaimon)) === nothing
+        end
+        withenv("KAIMON_CODE_INDEX" => nothing) do
+            @test Kaimon.code_indexing()
+        end
+
+        # Tools per caller, named on each request by the service in front.
+        @test Kaimon._parse_allowed_tools(" notes.search, notes_read ,") == ["notes.search", "notes_read"]
+        @test Kaimon._parse_allowed_tools(nothing) === nothing
+        s = (; id = "allow-test-session")
+        try
+            Kaimon._set_request_allowed!(["notes.search", "notes_read"])
+            @test Kaimon._refuse_tool_for_session(s, "notes.search", nothing) === nothing
+            @test Kaimon._refuse_tool_for_session(s, "notes.read", nothing) === nothing     # either spelling
+            @test occursin("not among", Kaimon._refuse_tool_for_session(s, "ex", nothing))
+            @test occursin("not among", Kaimon._refuse_tool_for_session(s, "notes.add", nothing))
+            Kaimon._set_request_allowed!(String[])                                                # an empty list: nothing
+            @test Kaimon._refuse_tool_for_session(s, "notes.search", nothing) !== nothing
+            Kaimon._set_request_allowed!(nothing)                                                 # no list: as before
+            @test Kaimon._refuse_tool_for_session(s, "ex", nothing) === nothing
+            withenv("KAIMON_RESTRICTED" => "1") do                                                # restricted: no list, no tools
+                @test Kaimon._refuse_tool_for_session(s, "ex", nothing) !== nothing
+                @test Kaimon._refuse_tool_for_session(nothing, "ex", nothing) !== nothing
+                Kaimon._set_session_agent_id!(s.id, "some-agent")                                 # an agent's session: its own rules
+                @test Kaimon._refuse_tool_for_session(s, "ex", nothing) === nothing
+            end
+
+            # The list belongs to the request: two requests on one session, overlapping, are each
+            # judged by their own header.
+            judged(list, tool) = fetch(@async begin
+                Kaimon._set_request_allowed!(list)
+                yield()                                       # let the other request set its list
+                Kaimon._refuse_tool_for_session(s, tool, nothing)
+            end)
+            a = @async judged(["notes.search"], "notes.search")
+            b = @async judged(["ex"], "notes.search")
+            @test fetch(a) === nothing && fetch(b) !== nothing
+        finally
+            Kaimon._set_request_allowed!(nothing)
+            lock(Kaimon._SESSION_AGENT_ID_LOCK) do; delete!(Kaimon._SESSION_AGENT_ID, s.id); end
+        end
     end
 
     @testset "_spawn_argv wraps Windows shim scripts, not native exes" begin

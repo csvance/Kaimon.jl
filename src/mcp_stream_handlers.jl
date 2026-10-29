@@ -357,6 +357,12 @@ function _stream_connect_tcp(http, req, body)
     return false
 end
 
+# Seconds of silence after which the GET stream writes an SSE comment. HTTP.jl's
+# server-side `isopen(stream)` stays true after the peer disconnects, so a write is
+# the only way to notice a client that has gone; without one the loop — and its
+# socket — lives for the rest of the server's lifetime.
+const _SSE_KEEPALIVE_SECS = Ref(15.0)
+
 function _stream_get_sse(http, req)
             if req.method == "GET" && (
                 req.target == "/mcp" ||
@@ -378,11 +384,17 @@ function _stream_get_sse(http, req)
                     @async try; _capture_roots!(sid); catch; end
                 end
                 try
+                    last_write = time()
                     while isopen(http)
+                        # A newer GET stream for this session closed our outbox when it
+                        # registered its own; this one has been replaced, so end it.
+                        outbox === nothing || isopen(outbox) || break
+                        wrote = false
                         # Targeted server→client messages (e.g. roots/list) first.
                         if outbox !== nothing
                             while isready(outbox)
                                 write(http, "data: $(JSON.json(take!(outbox)))\n\n")
+                                wrote = true
                             end
                         end
                         # Notifications newer than this stream's cursor. The cursor
@@ -395,8 +407,16 @@ function _stream_get_sse(http, req)
                         for notif in _flush_notifications_for_session!(sid; channel = :stream)
                             _push_log!(:info, "SSE notification flush (GET stream): $(get(notif, "method", ""))")
                             write(http, "data: $(JSON.json(notif))\n\n")
+                            wrote = true
                         end
-                        flush(http)
+                        if !wrote && time() - last_write >= _SSE_KEEPALIVE_SECS[]
+                            write(http, ": keepalive\n\n")
+                            wrote = true
+                        end
+                        if wrote
+                            flush(http)
+                            last_write = time()
+                        end
                         sleep(1)
                     end
                 catch e
@@ -431,26 +451,57 @@ function _stream_delete(http, req)
     return false
 end
 
+# The protocol versions this server speaks. All of them start with an `initialize` handshake.
+const _SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2025-11-05", "2024-11-05")
+
+# `400` with a plain JSON-RPC Invalid Request error. It is deliberately not one of the errors MCP
+# 2026-07-28 defines (-32020 to -32022), so a client that speaks both eras reads it as an older server
+# and falls back to `initialize`.
+function _write_unsupported_protocol!(http, id, message::AbstractString)
+    HTTP.setstatus(http, 400)
+    HTTP.setheader(http, "Content-Type" => "application/json")
+    HTTP.startwrite(http)
+    write(http, JSON.json(Dict(
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "error" => Dict("code" => -32600, "message" => message),
+    )))
+    return nothing
+end
+
 function _stream_protocol_version(http, req)
             # MCP-Protocol-Version header validation — 2025-11-25 spec requirement.
             # If the header is present it must name a supported protocol version.
             let ver = HTTP.header(req, "MCP-Protocol-Version", "")
-                if !isempty(ver) && ver ∉ ("2025-06-18", "2025-03-26", "2025-11-25", "2025-11-05", "2024-11-05")
-                    HTTP.setstatus(http, 400)
-                    HTTP.setheader(http, "Content-Type" => "application/json")
-                    HTTP.startwrite(http)
-                    write(http, JSON.json(Dict(
-                        "jsonrpc" => "2.0",
-                        "id" => nothing,
-                        "error" => Dict(
-                            "code" => -32600,
-                            "message" => "Unsupported MCP-Protocol-Version: $ver",
-                        ),
-                    )))
+                if !isempty(ver) && ver ∉ _SUPPORTED_PROTOCOL_VERSIONS
+                    _write_unsupported_protocol!(http, nothing, "Unsupported MCP-Protocol-Version: $ver")
                     return true
                 end
             end
     return false
+end
+
+"""
+    _stream_modern_request(http, parsed) -> Bool
+
+Answer a request in MCP 2026-07-28's form the way that revision expects of a server that only speaks the
+`initialize`-based versions: `400` with an error that is not one of its own, so a client that speaks both
+falls back to `initialize`. Such a request is `server/discover`, which 2026-07-28 added, or one whose
+`params._meta` names a protocol version this server does not speak. Otherwise it would be served on an
+anonymous session as though the client had initialized.
+"""
+function _stream_modern_request(http, parsed)
+    parsed isa AbstractDict || return false
+    params = get(parsed, "params", nothing)
+    meta = params isa AbstractDict ? get(params, "_meta", nothing) : nothing
+    ver = meta isa AbstractDict ? get(meta, "io.modelcontextprotocol/protocolVersion", nothing) : nothing
+    discover = get(parsed, "method", "") == "server/discover"
+    unsupported = ver isa AbstractString && ver ∉ _SUPPORTED_PROTOCOL_VERSIONS
+    (discover || unsupported) || return false
+    _write_unsupported_protocol!(http, get(parsed, "id", nothing),
+        "This server speaks MCP $(first(_SUPPORTED_PROTOCOL_VERSIONS)) and earlier: send `initialize` first" *
+        (unsupported ? " (requested $ver)" : ""))
+    return true
 end
 
 function _stream_empty_body(http, body)

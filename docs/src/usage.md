@@ -139,11 +139,11 @@ Supported clients: **Claude Code**, **VS Code** (Copilot / Continue), **Cursor**
 
 Press `i` to open the client list and select a target. Press `Enter` to write the config. Kaimon writes the correct format for each client including your API key if running in authenticated mode.
 
-The onboarding flow (`o`) creates a `.julia-startup.jl` file for per-project auto-connect, and the global gate option (`g`) appends the same snippet to `~/.julia/config/startup.jl` so every Julia session connects automatically.
-
-![Per-project gate](./assets/kaimon_startup_project.gif)
+The global gate option (`g`) appends the gate snippet to `~/.julia/config/startup.jl` so every Julia session connects automatically. For per-project auto-connect instead, see "Connect External REPLs" in [Getting Started](getting-started.md).
 
 ![Global gate](./assets/kaimon_startup_global.gif)
+
+Press `o` to cycle how much agent print output is removed from evals (`off`, `moderate`, `high`); see [Print Stripping](@ref print-strip). Press `a` to choose whether agents share one session per project or get their own; see [Private sessions](sessions.md#Private-sessions).
 
 The Config tab also manages the **allowed projects list** for managed sessions. Add projects here to enable AI agents to spawn sessions via the `start_session` tool. See [Projects Configuration](configuration.md#projects-configuration) for the file format.
 

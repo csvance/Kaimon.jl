@@ -74,7 +74,12 @@ function _gate_cache_dir()
     # gate auto-discovery whenever XDG_CACHE_HOME is set. Mirrors the #42 server
     # fix (1cf20a5) on the gate side — the half PR #45 patched in gate.jl that the
     # KaimonGate split didn't carry over. (#42, #45)
-    d = if Sys.iswindows()
+    # `KAIMON_CACHE_DIR` names the directory itself, for a Kaimon embedded in another service: its
+    # gates find it, and not a Kaimon the same person runs. It must match the server's.
+    explicit = get(ENV, "KAIMON_CACHE_DIR", "")
+    d = if !isempty(explicit)
+        explicit
+    elseif Sys.iswindows()
         joinpath(
             get(ENV, "LOCALAPPDATA", joinpath(homedir(), "AppData", "Local")),
             "Kaimon",
@@ -160,9 +165,11 @@ const GATE_LOCK = ReentrantLock()
 # through the single REPL backend and are effectively serial there.
 #   _EVAL_INFLIGHT — evals currently executing (after acquiring a slot)
 #   _EVAL_QUEUED   — evals blocked waiting for a slot (cap exceeded)
-# Both feed the "ran alongside N concurrent eval(s) (M queued)" note on results.
+#   _EVAL_STARTS   — evals ever started, so an eval can count the ones that began after it
+# They feed the "ran alongside N concurrent eval(s) (M queued)" note on results.
 const _EVAL_INFLIGHT = Threads.Atomic{Int}(0)
 const _EVAL_QUEUED   = Threads.Atomic{Int}(0)
+const _EVAL_STARTS   = Threads.Atomic{Int}(0)
 _eval_concurrency() = max(1, something(tryparse(Int, get(ENV, "KAIMON_GATE_EVAL_CONCURRENCY", "")), 4))
 const _EVAL_SEM = Ref{Union{Base.Semaphore,Nothing}}(nothing)
 const _EVAL_SEM_LOCK = ReentrantLock()

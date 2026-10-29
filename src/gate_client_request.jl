@@ -94,6 +94,20 @@ Send a request to the gate over its persistent DEALER and wait up to
 `(ok=true, response=...)` on success, or `(ok=false, error="...")` on
 failure/timeout. Multiple concurrent calls are fully independent.
 """
+# A session Kaimon started recently may answer pings before it can serve requests (packages still
+# loading, Pkg.instantiate running), so a timeout then says so.
+const _STARTING_WINDOW_S = 300.0
+
+function _caller_timeout_message(conn::REPLConnection, caller_timeout)
+    msg = "Caller timeout after $(caller_timeout)s"
+    ms = managed_session_for(conn)
+    ms === nothing && return msg
+    age = time() - ms.started_at
+    (ms.started_at > 0 && age < _STARTING_WINDOW_S) || return msg
+    return msg * ": the session started $(round(Int, age))s ago and has not answered yet; it may still be " *
+        "loading packages. Try again shortly, or check its log if it stays silent."
+end
+
 function _req_send_recv(conn::REPLConnection, request; caller_timeout::Float64 = 10.0)
     rc = conn.req_channel
     if rc === nothing || !rc.alive[] || conn.status ∉ (:connected, :evaluating, :stalled)
@@ -126,7 +140,7 @@ function _req_send_recv(conn::REPLConnection, request; caller_timeout::Float64 =
         raw = _await_inbox(inbox, time() + caller_timeout)
         if raw === nothing
             return rc.alive[] ?
-                   (ok = false, error = "Caller timeout after $(caller_timeout)s") :
+                   (ok = false, error = _caller_timeout_message(conn, caller_timeout)) :
                    (ok = false, error = "Gate disconnected")
         end
         isempty(raw) && return (ok = false, error = "Gate request failed (send error)")
@@ -476,9 +490,13 @@ end
 
 Send a `:restart` command to the gate. Returns `true` if the gate acknowledged.
 The gate will exec a fresh Julia process after replying.
+
+Stalled sessions (no pong, e.g. a wedged backend) are accepted too — a
+restart is precisely the remedy for a session in that state; rejecting it
+forces the heavier shutdown + re-spawn path.
 """
 function send_restart!(conn::REPLConnection)
-    (conn.status ∉ (:connected, :evaluating) || conn.req_channel === nothing) && return false
+    (conn.status ∉ (:connected, :evaluating, :stalled) || conn.req_channel === nothing) && return false
     result = _req_send_recv(conn, (type = :restart, name = conn.name); caller_timeout = 10.0)
     return result.ok && get(result.response, :type, :error) == :ok
 end

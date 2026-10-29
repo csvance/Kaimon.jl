@@ -95,6 +95,17 @@ Positively identifies our own processes so it won't kill user processes: Linux b
 markers in the command line (`spawned_by="extension"` + `namespace=…`), since neither
 exposes another process's environment. No-op on platforms without a supported probe.
 """
+# Which Kaimon an extension belongs to, so one Kaimon reaps only its own: an id from its cache
+# directory, which a Kaimon embedded in another service sets apart (`KAIMON_CACHE_DIR`). It is in
+# the extension's environment (`KAIMON_INSTANCE`) and, for platforms that cannot read another
+# process's environment, in its boot script as `kaimon_instance=<id>`.
+_instance_id() = bytes2hex(sha256(kaimon_cache_dir()))[1:12]
+
+# Whether a process with these instance markers (`nothing`: none) is this Kaimon's. One started
+# before extensions were marked has none, and is the default Kaimon's, as every Kaimon was then.
+_is_this_instance(marker) = marker === nothing ? isempty(get(ENV, "KAIMON_CACHE_DIR", "")) : marker == _instance_id()
+_instance_marker(text::AbstractString) = (m = match(r"kaimon_instance=([0-9a-f]+)", text); m === nothing ? nothing : String(m[1]))
+
 # Positively identify one of OUR extension boot processes from its command line, by the
 # markers baked into the `-e` script (see `_build_extension_script`): `spawned_by=`
 # "extension" and the `namespace=` assignment. Windows escapes embedded quotes when it
@@ -106,7 +117,8 @@ function _extension_cmdline_matches(cmdline::AbstractString, namespace::Abstract
     ns_marker = "namespace=\\\"$(namespace)\\\""
     return occursin("spawned_by=", cmdline) &&
            occursin("extension", cmdline) &&
-           occursin(ns_marker, cmdline)
+           occursin(ns_marker, cmdline) &&
+           _is_this_instance(_instance_marker(cmdline))
 end
 
 # Windows has no `/proc`, no readable per-process environment, and no `pgrep`/`kill`. Use
@@ -172,7 +184,9 @@ function _kill_orphan_extension_processes!(project_path::String, namespace::Stri
                 if Sys.islinux()
                     # Linux: read /proc/pid/environ
                     environ = read("/proc/$pid/environ", String)
-                    is_our_extension = contains(environ, "KAIMON_EXTENSION=$namespace")
+                    inst = match(r"KAIMON_INSTANCE=([0-9a-f]+)", environ)
+                    is_our_extension = contains(environ, "KAIMON_EXTENSION=$namespace") &&
+                                       _is_this_instance(inst === nothing ? nothing : String(inst[1]))
                 else
                     # macOS: env not easily readable — match the boot-script markers in
                     # the command line (`spawned_by="extension"` + `namespace="…"`). This is
@@ -181,7 +195,8 @@ function _kill_orphan_extension_processes!(project_path::String, namespace::Stri
                     cmdline = read(pipeline(`ps -p $pid -o command=`; stderr=devnull), String)
                     is_our_extension =
                         occursin("spawned_by=\"extension\"", cmdline) &&
-                        occursin("namespace=\"$(namespace)\"", cmdline)
+                        occursin("namespace=\"$(namespace)\"", cmdline) &&
+                        _is_this_instance(_instance_marker(cmdline))
                 end
             catch
             end
@@ -302,6 +317,7 @@ function _build_extension_script(config::ExtensionConfig; resolve::Bool = true)
         """try; import Pkg; Pkg.resolve(io=devnull); catch e; @warn "Pkg.resolve failed" exception=e; end""" : ""
 
     return """
+    # kaimon_instance=$(_instance_id())
     try
         using Revise
     catch; end
@@ -553,6 +569,7 @@ function spawn_extension!(ext::ManagedExtension)
         # Mark this process as Kaimon-spawned so we can identify orphans
         env["KAIMON_EXTENSION"] = ext.config.manifest.namespace
         env["KAIMON_PARENT_PID"] = string(getpid())
+        env["KAIMON_INSTANCE"] = _instance_id()
         # Manifest `env` defaults, for settings a runtime reads once at startup and that no flag
         # exposes. `get!` is the whole contract: the extension states what it wants, and anything
         # already in the environment — exported by the user, or set for a debugging run — wins.

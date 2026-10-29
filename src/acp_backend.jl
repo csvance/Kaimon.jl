@@ -344,8 +344,9 @@ because an agent's allowlist is generated from a single namespace, which keeps t
 of reach; a tool list assembled from two namespaces that share a prefix would need the stronger
 comparison.
 
-Only ACP agents are judged. The claude CLI enforces its own allowlist, and an empty `agent_id`
-means a caller that is not a Kaimon-owned agent at all.
+ACP agents are judged by their preset, and claude CLI agents opened with `only` by their
+allowlist. Another claude agent's `--allowedTools` only spares it permission prompts, so it is not
+judged here; an empty `agent_id` means a caller that is not a Kaimon-owned agent at all.
 
 `args` is read for the same reason `acp_bridge_decide` reads it: a tool name says what was called
 and not which file it touches. The bridge hook confines the paths an opencode agent passes, so
@@ -361,6 +362,11 @@ function agent_tool_refusal(agent_id::AbstractString, tool::AbstractString, args
     isempty(agent_id) && return nothing
     s = lock(AGENT_SESSIONS_LOCK) do; get(AGENT_SESSIONS, String(agent_id), nothing); end
     s === nothing && return nothing
+    if s.backend isa ClaudeBackend
+        s.backend.only || return nothing
+        return _only_allows(s.backend.allowed_tools, tool) ? nothing :
+               "$tool is not among the tools this agent was given"
+    end
     s.backend isa ACPClientBackend || return nothing
     bare = replace(String(tool), '.' => '_')
     qualified = _acp_qualified(bare) ? bare : "mcp__$(ACP_MCP_SERVER)__$bare"

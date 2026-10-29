@@ -47,6 +47,20 @@ _cap(code::AbstractString) =
     end
 end
 
+@testset "every overlapping eval reports the overlap (#97)" begin
+    try
+        first_task = Threads.@spawn KaimonGate.gate_eval("sleep(1.0); 1")
+        sleep(0.3)
+        second = KaimonGate.gate_eval("2")
+        first = fetch(first_task)
+        @test second.concurrent == 1
+        @test first.concurrent == 1        # it started first; the other joined it
+        @test KaimonGate.gate_eval("3").concurrent == 0
+    finally
+        KaimonGate._restore_capture!()
+    end
+end
+
 @testset "eval semaphore caps concurrency" begin
     cap = 3
     withenv("KAIMON_GATE_EVAL_CONCURRENCY" => string(cap)) do

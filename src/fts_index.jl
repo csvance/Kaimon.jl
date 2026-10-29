@@ -65,6 +65,23 @@ function _run_off_interactive(work::Function)
     return fetch(Threads.@spawn :default work())
 end
 
+"""
+    _with_db(f)
+
+Run `f(db)` against the open connection: off the interactive pool, holding `LOCK`, and
+in the newest world. SQLite is loaded on first use, so its methods can be newer than
+the calling task's world — a task started before the first FTS call (the startup
+coverage sync, an indexing job) would otherwise hit a MethodError on every SQLite call
+it makes. Every public op goes through here.
+"""
+function _with_db(f)
+    return _run_off_interactive() do
+        lock(LOCK) do
+            Base.invokelatest(f, _db())
+        end
+    end
+end
+
 """Default DB path in the user's cache dir (resolved via the parent Kaimon module)."""
 function default_db_path()
     return joinpath(parentmodule(@__MODULE__).kaimon_cache_dir(), "code_fts.db")
@@ -175,7 +192,7 @@ end
 function close!()
     lock(LOCK) do
         db = DB[]
-        db !== nothing && (_sqlite().close(db); DB[] = nothing)
+        db !== nothing && (Base.invokelatest(d -> _sqlite().close(d), db); DB[] = nothing)
     end
     return nothing
 end
@@ -205,9 +222,7 @@ row is a Dict/NamedTuple with: `point_id`, `collection`, `file`, `name`, `type`,
 """
 function add_chunks!(rows)
     isempty(rows) && return 0
-    return _run_off_interactive() do
-    lock(LOCK) do
-    db = _db()
+    return _with_db() do db
     n = 0
     _sqlite().transaction(db) do
         stmt = """
@@ -232,19 +247,15 @@ function add_chunks!(rows)
         end
     end
     n
-    end  # lock
-    end  # off-interactive
+    end
 end
 
 """Remove all chunks for one file in one collection (the reindex delete step)."""
 function delete_file!(collection::AbstractString, file::AbstractString)
-    _run_off_interactive() do
-    lock(LOCK) do
-        db = _db()
+    _with_db() do db
         DBInterface.execute(db, "DELETE FROM chunks WHERE collection = ? AND file = ?",
             (String(collection), String(file)))
     end
-    end  # off-interactive
     return nothing
 end
 
@@ -256,23 +267,17 @@ The distinct set of `file` paths indexed for one collection. Cheap (one indexed
 reconciliation to find indexed files that no longer exist on disk.
 """
 function distinct_files(collection::AbstractString)
-    _run_off_interactive() do
-    lock(LOCK) do
-        db = _db()
+    _with_db() do db
         return String[String(r.file) for r in DBInterface.execute(db,
             "SELECT DISTINCT file FROM chunks WHERE collection = ?", (String(collection),))]
     end
-    end  # off-interactive
 end
 
 """Drop every chunk for a collection (used on collection recreate / backfill reset)."""
 function clear_collection!(collection::AbstractString)
-    _run_off_interactive() do
-    lock(LOCK) do
-        db = _db()
+    _with_db() do db
         DBInterface.execute(db, "DELETE FROM chunks WHERE collection = ?", (String(collection),))
     end
-    end  # off-interactive
     return nothing
 end
 
@@ -466,9 +471,7 @@ function search(query::AbstractString; collection::Union{AbstractString,Nothing}
                 limit::Int = 20, chunk_type::AbstractString = "all",
                 filters::Union{Nothing,AbstractDict} = nothing)
     isempty(strip(query)) && return (word = FtsHit[], tri = FtsHit[], fellback = false, capped = 0)
-    return _run_off_interactive() do
-    lock(LOCK) do
-    db = _db()
+    return _with_db() do db
     tclause = _type_clause(chunk_type)
     cclause = collection === nothing ? "" : "AND c.collection = ?"
     ctail = collection === nothing ? () : (String(collection),)
@@ -526,24 +529,20 @@ function search(query::AbstractString; collection::Union{AbstractString,Nothing}
     end
 
     (word = word, tri = tri, fellback = fellback, capped = capped)
-    end  # lock
-    end  # off-interactive
+    end
 end
 
 # ── Coverage (for search-health visibility) ───────────────────────────────────
 
 """Per-collection chunk counts + total, for the search-health surface."""
 function coverage()
-    return _run_off_interactive() do
-    lock(LOCK) do
-        db = _db()
+    return _with_db() do db
         # Materialize during iteration (see _match_hits note on transient Rows).
         per = [(collection = String(r.collection), n = Int(r.n))
                for r in DBInterface.execute(db,
                    "SELECT collection, COUNT(*) AS n FROM chunks GROUP BY collection ORDER BY n DESC")]
         (collections = per, total = sum(p -> p.n, per; init = 0))
     end
-    end  # off-interactive
 end
 
 end # module FtsIndex

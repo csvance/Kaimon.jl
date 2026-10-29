@@ -236,10 +236,20 @@ function spawn_test_run(
     env = Dict(k => v for (k, v) in ENV)
     delete!(env, "JULIA_LOAD_PATH")
     delete!(env, "JULIA_PROJECT")
-    # `--code-coverage=user` makes the subprocess emit <src>.jl.<pid>.cov files for user
-    # code on exit (the suite runs in-process via include); _collect_coverage parses and
-    # removes them afterward.
-    cov_flag = coverage ? `--code-coverage=user` : ``
+    # Where a project without test/Project.toml keeps the env built from its [extras]/[targets].
+    get!(env, "KAIMON_TEST_ENV_CACHE", joinpath(kaimon_cache_dir(), "test-envs"))
+    # `--code-coverage=@<project>` makes the subprocess emit <file>.jl.<pid>.cov files on exit for
+    # code under the project only (the suite runs in-process via include); `user` would also
+    # instrument every dependency and leave .cov files in their installed sources. Julia matches
+    # `@<path>` so that a project under a symlink (macOS's /tmp is one) gets no coverage at all,
+    # whichever way the path is written, so such a project falls back to `user`.
+    # _collect_coverage reads and removes the files afterward.
+    cov_flag = if !coverage
+        ``
+    else
+        p = abspath(project_path)
+        realpath(p) == p ? `--code-coverage=@$p` : `--code-coverage=user`
+    end
     # `stdin = devnull` is required, not tidiness. Left inherited, the suite gets whatever Kaimon
     # has on fd 0, which under the TUI is the user's controlling terminal. A suite that reads it,
     # or puts it in raw mode, is doing so from a background process group, and the kernel answers
@@ -379,58 +389,40 @@ end
 """
     _collect_coverage(project_path) -> String
 
-Parse and summarize the `.cov` files produced by `--code-coverage=user`, then delete
-them (they otherwise litter `src/`). Scans `src/` of the project under test. Coverage
-is computed per source line: a line is *coverable* if its `.cov` field is a number
-(`-` marks non-executable lines) and *covered* if any run executed it (count > 0).
-Multiple `.cov` files for one source (e.g. TestItemRunner worker processes) are merged
-per line by max count. Returns a focused summary (overall % + the least-covered files).
+Summarize the `.cov` files the run produced under the project's `src/`, then delete every
+`.cov` file in the project (`src/` and `test/` alike). Counting is CoverageTools', the same
+LocalCoverage and Coverage.jl report: Julia writes a count only for code it compiled, so the
+lines of a function no test called, and of a file no test loaded, are read from the source
+and count as not covered. Several `.cov` files for one source (e.g. TestItemRunner worker
+processes) are summed. Returns the overall line coverage and the least-covered files.
 """
 function _collect_coverage(project_path::String)::String
     src_root = isdir(joinpath(project_path, "src")) ? joinpath(project_path, "src") : project_path
-    cov_files = String[]
-    for (root, _, files) in walkdir(src_root)
-        for f in files
-            endswith(f, ".cov") && push!(cov_files, joinpath(root, f))
-        end
+    produced = any(walkdir(src_root)) do (_, _, files)
+        any(f -> endswith(f, ".cov"), files)
     end
-    isempty(cov_files) &&
-        return "Coverage: no .cov data was produced (no instrumented src/ code ran)."
-
-    merged = Dict{String,Dict{Int,Int}}()   # source path => (line number => max count)
-    for cf in cov_files
-        src = replace(replace(cf, r"\.\d+\.cov$" => ""), r"\.cov$" => "")
-        d = get!(merged, src, Dict{Int,Int}())
-        try
-            for (i, ln) in enumerate(eachline(cf))
-                m = match(r"^\s*(\d+|-)\s", ln)
-                m === nothing && continue
-                m.captures[1] == "-" && continue
-                n = parse(Int, m.captures[1])
-                d[i] = max(get(d, i, 0), n)
-            end
-        catch
-        end
-        try; rm(cf); catch; end
+    # CoverageTools logs a line per file it reads and removes; that belongs to the run, not Kaimon's log.
+    quiet(f) = Base.CoreLogging.with_logger(f, Base.CoreLogging.NullLogger())
+    fcs = produced ? quiet(() -> CoverageTools.process_folder(src_root)) : CoverageTools.FileCoverage[]
+    try
+        quiet(() -> CoverageTools.clean_folder(project_path))
+    catch e
+        @debug "Removing .cov files failed" exception = e
     end
+    produced || return "Coverage: no .cov data was produced (no instrumented src/ code ran)."
 
     rows = Tuple{String,Int,Int}[]   # (source, covered, coverable)
-    total_covered = 0
-    total_coverable = 0
-    for (src, lines) in merged
-        coverable = length(lines)
-        covered = count(>(0), values(lines))
-        coverable == 0 && continue
-        total_covered += covered
-        total_coverable += coverable
-        push!(rows, (src, covered, coverable))
+    for fc in fcs
+        covered, coverable = CoverageTools.get_summary(fc)
+        coverable > 0 && push!(rows, (fc.filename, covered, coverable))
     end
+    total_covered, total_coverable = CoverageTools.get_summary(fcs)
     total_coverable == 0 && return "Coverage: no executable lines were tracked."
 
     pct(c, t) = t == 0 ? 0.0 : round(100 * c / t; digits = 1)
     io = IOBuffer()
     println(io, "Coverage: $total_covered/$total_coverable lines ($(pct(total_covered, total_coverable))%)  ",
-        "[counts only instrumented lines; Julia may omit uncalled one-liner methods]")
+        "[as LocalCoverage/Coverage.jl count it: uncalled functions and unloaded files count as not covered]")
     sort!(rows; by = r -> r[2] / max(1, r[3]))   # least-covered first
     for (src, cov, cab) in first(rows, 15)
         rel = try; relpath(src, project_path); catch; src; end

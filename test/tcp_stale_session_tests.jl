@@ -420,6 +420,21 @@ end
         @test !Kaimon._is_local_tcp(remote_tcp)
     end
 
+    @testset "backtrace signals only a known local pid" begin
+        # Each of these must return before kill(2): a remote pid names another machine's process,
+        # and pid 0 would signal this process's whole group.
+        remote_tcp = Kaimon.REPLConnection(
+            session_id = "tcp-10.0.0.5-9100", endpoint = "tcp://10.0.0.5:9100",
+            spawned_by = "user", pid = Int(getpid()))
+        no_pid = Kaimon.REPLConnection(
+            session_id = "no-pid", endpoint = "ipc:///tmp/no-pid.sock", spawned_by = "user", pid = 0)
+        for conn in (remote_tcp, no_pid)
+            t = time()
+            @test Kaimon.trigger_backtrace(conn) === nothing
+            @test time() - t < 1   # returned up front, not after polling for a backtrace file
+        end
+    end
+
     @testset "Bug 1: PID refreshed from pong (port reuse)" begin
         mgr = Kaimon.ConnectionManager(sock_dir = mktempdir())
         # conn carries a stale (dead predecessor's) PID; a fresh pong reports the
@@ -727,4 +742,49 @@ end
     @test !("tcp-127.0.0.1-9100" in ids)   # already tracked → skipped (no reconnect/flap)
     @test "tcp-127.0.0.1-9200" in ids       # untracked local TCP → still discovered
     rm(dir; recursive = true)
+end
+
+@testset "A restarted gate takes its namespace back" begin
+    mgr = Kaimon.ConnectionManager(sock_dir = mktempdir())
+    conn(id, pid, ns, status) = (c = Kaimon.REPLConnection(session_id = id, endpoint = "ipc:///tmp/$id.sock",
+                                                             spawned_by = "user", pid = Int(pid));
+                                 c.namespace = ns; c.status = status; c)
+    # The session it replaces, its process gone but not reaped yet, gives the namespace up.
+    old = conn("old-gate", _dead_pid(), "kb", :connected)
+    bystander = conn("other-gate", getpid(), "other", :connected)
+    new = conn("new-gate", getpid(), "kb", :connecting)
+    lock(mgr.lock) do
+        append!(mgr.connections, [old, bystander, new])
+    end
+    @test Kaimon._resolve_namespace!(new, mgr) == "kb"
+    @test !(old in mgr.connections) && bystander in mgr.connections && old.status == :disconnected
+    # A live session of the namespace keeps it: another one still gets a suffix.
+    new.status = :connected
+    another = conn("another-gate", getpid(), "kb", :connecting)
+    lock(mgr.lock) do
+        push!(mgr.connections, another)
+    end
+    @test Kaimon._resolve_namespace!(another, mgr) == "kb_2" && new in mgr.connections
+end
+
+@testset "Tool calls wait for a gate that is connecting" begin
+    c = Kaimon.REPLConnection(session_id = "slow-gate", endpoint = "ipc:///tmp/slow-gate.sock", spawned_by = "user")
+    c.status = :connecting
+    @async (sleep(0.3); c.status = :disconnected)
+    t = time()
+    @test !Kaimon._gate_callable(c; wait_s = 5)            # gave up when it failed, not after the wait
+    @test time() - t < 2
+    c.status = :stalled                                     # stalled, but with no request channel to send on
+    @test !Kaimon._gate_callable(c; wait_s = 0)
+    @test occursin("status=stalled", Kaimon._call_session_tool(c, "t", Dict()))
+
+    # Stalled with a channel: a busy gate is sent the call, one whose process exited is not.
+    c.req_channel = Kaimon.RequestChannel(
+        Kaimon.ZMQ.Socket(Kaimon.ZMQ.DEALER), "ipc:///kaimon-test-unused",
+        Channel{Tuple{UInt64,Vector{UInt8}}}(1), Dict{UInt64,Channel{Any}}(), ReentrantLock(),
+        Threads.Atomic{UInt64}(0), nothing, nothing, Ref(true), nothing, ReentrantLock(), Threads.Event(true), Threads.Event(true))
+    c.pid = getpid()
+    @test Kaimon._gate_callable(c; wait_s = 0)
+    c.pid = _dead_pid()
+    @test !Kaimon._gate_callable(c; wait_s = 0)
 end

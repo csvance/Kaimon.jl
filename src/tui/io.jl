@@ -23,7 +23,9 @@ const _TUI_ORIG_STDERR = Ref{Any}(nothing)
 const _TUI_STDERR_TASK = Ref{Union{Task,Nothing}}(nothing)
 const _TUI_STDERR_RUNNING = Ref{Bool}(false)
 
-const _TUI_LOG_PATH = joinpath(kaimon_cache_dir(), "server.log")
+# Resolved when the log is opened, not when the package compiles, so an instance with its own cache
+# directory (KAIMON_CACHE_DIR) writes its own log.
+_tui_log_path() = joinpath(kaimon_cache_dir(), "server.log")
 
 const _LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
@@ -32,14 +34,15 @@ function _open_log_file!()
     # before tui() takes over). Don't leak the existing one.
     _TUI_LOG_FILE[] === nothing || return
     try
-        mkpath(dirname(_TUI_LOG_PATH))
+        path = _tui_log_path()
+        mkpath(dirname(path))
         # Rotate if too large
-        if isfile(_TUI_LOG_PATH) && filesize(_TUI_LOG_PATH) > _LOG_MAX_BYTES
-            rotated = _TUI_LOG_PATH * ".1"
+        if isfile(path) && filesize(path) > _LOG_MAX_BYTES
+            rotated = path * ".1"
             try; rm(rotated; force=true); catch; end
-            try; mv(_TUI_LOG_PATH, rotated); catch; end
+            try; mv(path, rotated); catch; end
         end
-        _TUI_LOG_FILE[] = open(_TUI_LOG_PATH, "a")
+        _TUI_LOG_FILE[] = open(path, "a")
     catch
         _TUI_LOG_FILE[] = nothing
     end

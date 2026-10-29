@@ -15,6 +15,7 @@ const agent_open_tool = @mcp_tool :agent_open "Spawn a Kaimon-owned AI agent in 
         "mcp_config" => Dict("type" => "string", "description" => "Optional path to an --mcp-config JSON pointing the agent at the live Kaimon MCP (M3)."),
         "system_prompt" => Dict("type" => "string", "description" => "Optional instructions/context to initialize the agent with (appended to its system prompt; applies to every turn)."),
         "effort" => Dict("type" => "string", "description" => "Optional claude --effort level (e.g. low|medium|high). Lower = less thinking = faster turns."),
+        "only" => Dict("type" => "boolean", "description" => "Make allowed_tools the agent's whole tool set (claude CLI agents): the CLI loads only the built-in tools it names (plus ToolSearch when it names MCP tools), and Kaimon hides and refuses every Kaimon tool it does not name. Without it, allowed_tools only spares the agent permission prompts, and every other tool stays available."),
         "id" => Dict("type" => "string", "description" => "Optional caller-supplied agent id (e.g. to key to a notebook)."),
     ),
     "required" => ["cwd"],
@@ -30,6 +31,7 @@ const agent_open_tool = @mcp_tool :agent_open "Spawn a Kaimon-owned AI agent in 
             mcp_config = get(args, "mcp_config", nothing),
             system_prompt = get(args, "system_prompt", nothing),
             effort = get(args, "effort", nothing),
+            only = get(args, "only", false) === true,
             id = get(args, "id", nothing))
         JSON.json(Dict("agent_id" => aid))
     catch e

@@ -9,8 +9,29 @@ Kaimon uses [Preferences.jl](https://github.com/JuliaPackaging/Preferences.jl) f
 | Preference | Type | Description |
 |------------|------|-------------|
 | `gate_mirror_repl` | `Bool` | Mirror eval output from MCP agents into the host REPL. Useful for seeing what agents are executing in real time. |
+| `agent_sessions` | `String` | `"shared"` (default): `start_session` returns the session already running for a project. `"private"`: each MCP client gets its own. Toggle with `[a]` in the Config tab. See [Private sessions](sessions.md#Private-sessions). |
+| `print_strip` | `String` | How much output-producing code is removed from agent evals: `"off"`, `"moderate"` (default) or `"high"`. Cycle it with `[o]` in the Config tab. See [Print Stripping](@ref print-strip). |
 
 Layout preferences for TUI panels (sizes, positions, visibility) are also persisted through the Preferences system.
+
+### [Print Stripping](@id print-strip)
+
+Agents given a shared REPL tend to report through `println`, `@show` and `@info`, which fills the
+terminal and the agent's context with narration. Kaimon removes those calls from the code an
+agent submits, at the level set by `print_strip` (or the `KAIMON_PRINT_STRIP` environment
+variable, which takes precedence):
+
+| Level | What is removed |
+|-------|-----------------|
+| `off` | Nothing. The code runs exactly as submitted. |
+| `moderate` | With `q=true` only: print calls, `@show` and logging macros that the cell runs as statements. Function, macro, lambda and `do` bodies and call arguments are left alone. |
+| `high` | Print calls everywhere, including inside functions the agent defines, whatever `q` is. `@show` with `q=true`. |
+
+At every level, only Base's `print`/`println`/`printstyled` are candidates (`Profile.print(io)` is
+another function), and a call writing to an IO variable is kept. Logging macros are removed only
+as the cell's own top-level statements, since inside a `try`/`catch` they usually report real
+errors. A removed `@show x = 1` still runs `x = 1`. The rest of the cell reaches the REPL exactly
+as written, and the agent's result carries a note when anything was removed.
 
 ## Directory Layout
 
@@ -135,7 +156,14 @@ How Kaimon starts a managed session for a project — most importantly, which **
 | `gcthreads` | `--gcthreads` value |
 | `heap_size_hint` | `--heap-size-hint` value, e.g. `8G` |
 | `startup_file` | Run `~/.julia/config/startup.jl`. Default `false` |
+| `instantiate` | `Pkg.instantiate` before the session connects: `"auto"`, `"always"` or `"never"` (`true`/`false` also work). Default `"auto"` |
 | `extra_flags` | Any further Julia flags, passed through verbatim |
+
+#### Instantiating the environment
+
+A spawned session runs `Pkg.instantiate` before it connects, so an environment that isn't installed yet still boots. By default (`"auto"`) this runs with Pkg's automatic precompilation turned off: missing packages are installed, and packages compile when the session loads them. Precompiling the whole manifest at each spawn would recompile every stale package in it, including dev'd packages that the session never loads and ones that currently fail to build.
+
+`"always"` precompiles the whole manifest as well. `"never"` skips `Pkg.instantiate`, for an environment you manage by hand. Its output, including any failure, goes to the session log; a failure does not stop the session from connecting.
 
 #### Requesting a Julia version
 
@@ -254,6 +282,12 @@ that is nearly always a typo in a tool name.
 | `APPDATA` | Windows | Windows config directory. Kaimon stores config in `$APPDATA/Kaimon/`. |
 | `XDG_CACHE_HOME` | Linux/macOS | Override the default cache directory (`~/.cache`). Kaimon stores data in `$XDG_CACHE_HOME/kaimon/`. |
 | `LOCALAPPDATA` | Windows | Windows equivalent of the cache directory. Kaimon stores data in `$LOCALAPPDATA/Kaimon/`. |
+| `KAIMON_CONFIG_DIR` | all | Use this directory for config instead of the default. For a Kaimon embedded in another service; see [Running Kaimon inside another service](@ref embedded). |
+| `KAIMON_CACHE_DIR` | all | Use this directory for the cache (database, sockets, sessions, logs) instead of the default. Its gates must see the same value to find it. |
+| `KAIMON_RESTRICTED` | all | `1`: a request that names no tools in `X-Kaimon-Allowed-Tools`, from a session no agent owns, may use none. |
+| `KAIMON_CODE_INDEX` | all | `0`: no automatic code indexing, and no FTS catch-up or pruning over the shared Qdrant. |
+| `KAIMON_AGENT_SESSIONS` | all | `shared` or `private`. Overrides the `agent_sessions` preference. |
+| `KAIMON_PRINT_STRIP` | all | `off`, `moderate` or `high`. Overrides the `print_strip` preference. See [Print Stripping](@ref print-strip). |
 | `KAIMON_TEST_PROMOTE_AFTER` | all | Seconds a test run may hold the foreground before `run_tests` backgrounds it (default `30`). `0` never backgrounds. |
 | `KAIMON_TEST_CONCURRENCY` | all | Test runs allowed in flight per project (default `1`). Runs are serialised because overlapping suites share fixtures and global state. |
 | `KAIMON_TOOL_HOLD_SECONDS` | all | How long an extension's tools stay listed while it restarts (default `45`). Overrides `extension_tool_hold_seconds`. See [Tools Stay Listed Across a Restart](extensions.md#Tools-Stay-Listed-Across-a-Restart). |
@@ -272,6 +306,23 @@ These configure the gate (`KaimonGate`); they can also be set in a project's
     `kaimon.toml` when the package loads. A standalone `using KaimonGate` session
     does not auto-start — it reads them for settings but you must call
     `KaimonGate.serve()` explicitly.
+
+## [Running Kaimon inside another service](@id embedded)
+
+A service can run a headless Kaimon of its own and put it in front of its users, beside the Kaimon
+the same person runs for their own work. These settings keep the two apart and let the service
+decide which tools each of its callers may use:
+
+- `KAIMON_CONFIG_DIR` and `KAIMON_CACHE_DIR` give the instance its own config, keys, sockets,
+  sessions and log. Each Kaimon reaps only the extensions it started.
+- The service sends `X-Kaimon-Allowed-Tools` on every request it forwards: the tools that request's
+  caller may use, comma-separated, in the dotted (`notes.search`) or underscore spelling. Each tool
+  call and tool list is judged by the header on its own request. The service must strip any copy a
+  client sends.
+- `KAIMON_RESTRICTED=1` makes a request with no list get no tools, unless an agent Kaimon owns is
+  behind its session. An agent's own permissions never widen the list.
+- `KAIMON_CODE_INDEX=0` stops the instance indexing code, which would otherwise walk every
+  collection in a Qdrant it shares with the service.
 
 ## TUI Configuration
 

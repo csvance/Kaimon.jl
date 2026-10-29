@@ -14,6 +14,16 @@ const HOUSEKEEPING_TASK = Ref{Union{Task,Nothing}}(nothing)
 const HOUSEKEEPING_STOP = Ref{Bool}(false)
 
 """
+    code_indexing() -> Bool
+
+Whether this Kaimon indexes code on its own: approved and connected projects, at startup and
+periodically, and the lexical index's catch-up and pruning over every collection in Qdrant.
+`KAIMON_CODE_INDEX=0` turns it off, for a Kaimon embedded in another service, which shares a Qdrant
+it must leave alone and serves no one's code.
+"""
+code_indexing() = get(ENV, "KAIMON_CODE_INDEX", "") != "0"
+
+"""
     _headless_sync_interval_seconds() -> Int
 
 Seconds between periodic full index syncs (0 disables). `KAIMON_HEADLESS_SYNC_INTERVAL`
@@ -678,7 +688,33 @@ behalf. Quitting is the case that matters: the parent owns the process lifetime.
 """
 kaimon_embedded() = get(ENV, "KAIMON_EMBEDDED", "") in ("1", "true", "yes")
 
+"""
+    _finish_exit_without_runtime_hook(exitcode)
+
+An `atexit` hook that runs the remaining `atexit` hooks itself and then ends the process with
+`_exit`, skipping the rest of Julia's C exit hook. That hook runs libuv's loop while holding its
+lock, before it stops the other threads, so a thread still running Julia code at exit (ZMQ and
+HTTP poller threads, a task being compiled) can deadlock it, which is frequent on Julia 1.13.
+Everything Kaimon needs from exit (its teardown, the other packages' hooks) runs before. Not used
+when coverage or malloc logs are being collected, because the C hook writes those files.
+"""
+function _finish_exit_without_runtime_hook(exitcode::Integer)
+    opts = Base.JLOptions()
+    (opts.code_coverage != 0 || opts.malloc_log != 0) && return
+    hasmethod(Base._atexit, Tuple{Cint}) || return
+    try
+        Base._atexit(Cint(exitcode))
+    catch e
+        try; @error "Error in atexit hooks" exception = (e, catch_backtrace()); catch; end
+    end
+    try; flush(stdout); flush(stderr); catch; end
+    ccall(:_exit, Cvoid, (Cint,), Cint(exitcode))
+end
+
 function (@main)(ARGS)
+    # Registered first, so every hook registered later (the headless teardown) runs before it.
+    atexit(_finish_exit_without_runtime_hook)
+
     # Fire-and-forget: resolve the user's global environment in the background.
     # When Kaimon gains new deps, the global env manifest (where Kaimon is dev'd)
     # becomes stale — this ensures `using Kaimon` in startup.jl works next time.

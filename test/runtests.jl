@@ -8,6 +8,10 @@ let cache = mktempdir()
     ENV["XDG_CACHE_HOME"] = cache                 # Unix
     Sys.iswindows() && (ENV["LOCALAPPDATA"] = cache)
 end
+# Likewise keep the suite out of the live Qdrant: a test that starts the server would
+# otherwise index projects into it and run the startup FTS backfill, which copies every
+# real collection into whatever FTS DB a later test has opened.
+ENV["KAIMON_CODE_INDEX"] = "0"
 
 using ReTest
 

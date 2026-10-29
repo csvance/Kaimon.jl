@@ -7,6 +7,10 @@
     ManagedSession
 
 Tracks the lifecycle of a managed session subprocess spawned by an agent.
+
+`owner` is the MCP session id of the agent that started it privately (see `start_session`'s
+`private`), or `""` for a shared session. A private session is never handed to another agent
+by `start_session` or picked for it by automatic binding.
 """
 mutable struct ManagedSession
     project_path::String
@@ -18,16 +22,18 @@ mutable struct ManagedSession
     session_key::String     # gate session key once connected (8-char)
     error_log::Vector{String}
     log_file::String        # path to stderr/stdout log
+    owner::String           # MCP caller that owns it privately; "" = shared
 end
 
-function ManagedSession(project_path::String; name::String = "")
+function ManagedSession(project_path::String; name::String = "", owner::String = "")
     if isempty(name)
-        name = basename(project_path)
+        name = isempty(owner) ? basename(project_path) : "$(basename(project_path)) (private)"
     end
     log_dir = joinpath(kaimon_cache_dir(), "sessions")
     mkpath(log_dir)
-    log_file = joinpath(log_dir, "$(basename(project_path)).log")
-    ManagedSession(project_path, name, nothing, nothing, :stopped, 0.0, "", String[], log_file)
+    stem = isempty(owner) ? basename(project_path) : "$(basename(project_path))-$(first(owner, 8))"
+    log_file = joinpath(log_dir, "$stem.log")
+    ManagedSession(project_path, name, nothing, nothing, :stopped, 0.0, "", String[], log_file, owner)
 end
 
 """Return the PID of a managed session (from PTY or Process)."""
@@ -47,13 +53,16 @@ end
 # ── Spawn / Stop ─────────────────────────────────────────────────────────────
 
 """
-    _build_session_script(project_path; name="") -> String
+    _build_session_script(project_path; name="", allow_restart=true, instantiate="auto") -> String
 
-Generate the Julia `-e` script that boots a session subprocess.
+Generate the Julia `-e` script that boots a session subprocess. `instantiate` is the launch
+config mode (see `LaunchConfig`); its output goes to the session log, and a failure is
+reported there without stopping the session from connecting.
 """
 function _build_session_script(project_path::String;
                                name::String = "",
-                               allow_restart::Bool = true)
+                               allow_restart::Bool = true,
+                               instantiate::String = "auto")
     # The subprocess is launched with --project=<target>, so the target project
     # and its deps are the active environment. It boots only the lightweight
     # `KaimonGate` (ZMQ + stdlib) — NOT the heavyweight Kaimon — so a session
@@ -65,9 +74,18 @@ function _build_session_script(project_path::String;
     cd($(repr(project_path)))
     try; using Revise; catch; end
     using KaimonGate
-    import Pkg; Pkg.instantiate(; io=devnull)
+    $(_instantiate_line(instantiate))
     @async KaimonGate.serve(force=true, allow_mirror=true, allow_restart=$(allow_restart), spawned_by="agent")
     """
+end
+
+# The script line for a launch config `instantiate` mode. "auto" turns off Pkg's automatic
+# precompilation for the call: every stale package in the manifest would otherwise be
+# compiled at each spawn, including dev'd packages the session never loads.
+function _instantiate_line(mode::AbstractString)
+    mode == "never" && return ""
+    call = mode == "always" ? "Pkg.instantiate()" : "Pkg.instantiate(; allow_autoprecomp = false)"
+    return "import Pkg; try; $call; catch e; @error \"Pkg.instantiate failed\" exception = e; end"
 end
 
 """
@@ -231,6 +249,42 @@ function _build_julia_cmd(lc::LaunchConfig, script::String; project::String = ""
     return cmd
 end
 
+# Wait for the session's process to exit, then record it, finish its log, and release its terminal.
+function _watch_session_exit!(ms::ManagedSession, pty, log_io; poll::Real = 2.0)
+    while Tachikoma.pty_alive(pty)
+        sleep(poll)
+    end
+    if ms.status in (:starting, :running)
+        ms.status = :crashed
+        _push_session_error!(ms, "Process exited at $(Dates.now())")
+        _push_log!(
+            :warn,
+            "Managed session '$(ms.name)' process exited unexpectedly",
+        )
+    end
+    # Final drain and close log
+    if log_io !== nothing
+        try
+            while isready(pty.output)
+                data = try
+                    take!(pty.output)
+                catch
+                    break
+                end
+                write(log_io, data)
+            end
+            println(log_io, "--- Session $(ms.name) exited at $(Dates.now()) ---")
+        catch
+        end
+        try
+            close(log_io)
+        catch
+        end
+    end
+    # Release its terminal and reap it. Nothing to do if stop_session! already took the PTY.
+    _close_pty!(_take_pty!(ms, pty))
+end
+
 """
     spawn_session!(ms::ManagedSession)
 
@@ -248,10 +302,10 @@ function spawn_session!(ms::ManagedSession)
         v = resolve_session_pref(sp, ms.project_path, :allow_restart)
         v !== nothing ? v : true  # default: restart allowed
     end
-    script = _build_session_script(ms.project_path; name = ms.name, allow_restart = ar)
-
     try
         lc = _resolve_launch_config(ms.project_path)
+        script = _build_session_script(ms.project_path; name = ms.name, allow_restart = ar,
+                                       instantiate = isempty(lc.instantiate) ? "auto" : lc.instantiate)
         cmd = _build_julia_cmd(lc, script; project = ms.project_path)
         # Build the env overlay: --project=<target> controls the active
         # environment, KaimonGate's own env is appended to JULIA_LOAD_PATH so the
@@ -300,39 +354,7 @@ function spawn_session!(ms::ManagedSession)
             end
         end
 
-        # Background task to detect PTY/process exit
-        @async begin
-            while Tachikoma.pty_alive(pty)
-                sleep(2.0)
-            end
-            if ms.status in (:starting, :running)
-                ms.status = :crashed
-                _push_session_error!(ms, "Process exited at $(Dates.now())")
-                _push_log!(
-                    :warn,
-                    "Managed session '$(ms.name)' process exited unexpectedly",
-                )
-            end
-            # Final drain and close log
-            if log_io !== nothing
-                try
-                    while isready(pty.output)
-                        data = try
-                            take!(pty.output)
-                        catch
-                            break
-                        end
-                        write(log_io, data)
-                    end
-                    println(log_io, "--- Session $(ms.name) exited at $(Dates.now()) ---")
-                catch
-                end
-                try
-                    close(log_io)
-                catch
-                end
-            end
-        end
+        @async _watch_session_exit!(ms, pty, log_io)
 
         _push_log!(:info, "Session '$(ms.name)' subprocess spawning (PID=$(Int(pty.child_pid)))")
     catch e
@@ -345,6 +367,28 @@ function spawn_session!(ms::ManagedSession)
     end
 end
 
+# Detach the session's PTY so that exactly one caller closes it. The exit monitor and stop_session!
+# can run on different threads, and a second close(2) could hit an fd number the OS has reused.
+# With `expected`, the PTY is taken only if it is still that one.
+function _take_pty!(ms::ManagedSession, expected = nothing)
+    lock(MANAGED_SESSIONS_LOCK) do
+        pty = ms.pty
+        (pty === nothing || (expected !== nothing && pty !== expected)) && return nothing
+        ms.pty = nothing
+        return pty
+    end
+end
+
+_close_pty!(::Nothing) = nothing
+function _close_pty!(pty)
+    try
+        Tachikoma.pty_close!(pty)
+    catch e
+        _push_log!(:warn, "Closing a session terminal failed: $(sprint(showerror, e))")
+    end
+    return nothing
+end
+
 """
     stop_session!(ms::ManagedSession; timeout::Float64=5.0)
 
@@ -355,14 +399,9 @@ function stop_session!(ms::ManagedSession; timeout::Float64 = 5.0)
     prev_status = ms.status
     ms.status = :stopped
 
-    # PTY-based session
-    if ms.pty !== nothing
-        try
-            Tachikoma.pty_close!(ms.pty)
-        catch
-        end
-        ms.pty = nothing
-    end
+    # PTY-based session: closing the PTY hangs up the child, reaps it, and kills one that outlives the
+    # grace period.
+    _close_pty!(_take_pty!(ms))
 
     # Legacy pipeline-based session
     proc = ms.process
@@ -459,27 +498,34 @@ function _monitor_managed_sessions!(conn_mgr)
         end
 
         if ms.status == :starting
-            # Look for a matching gate session by project_path
+            # Match the gate that connected for this process. Several sessions can share
+            # a project, so the process id decides; the project path is the fallback for
+            # a `julia_bin` wrapper that runs Julia as a child (a different pid). A gate
+            # another managed session already claimed is never matched twice.
+            claimed = Set(s.session_key for s in sessions if s !== ms && !isempty(s.session_key))
+            pid = session_pid(ms)
             norm_path = try
                 realpath(ms.project_path)
             catch
                 ms.project_path
             end
-            for conn in conns
-                conn_norm = try
-                    realpath(conn.project_path)
-                catch
-                    conn.project_path
-                end
-                if conn_norm == norm_path && is_agent_spawned(conn)
-                    ms.status = :running
-                    ms.session_key = short_key(conn)
-                    _push_log!(
-                        :info,
-                        "Session '$(ms.name)' connected (session=$(ms.session_key))",
-                    )
-                    break
-                end
+            other_pids = Set(session_pid(s) for s in sessions if s !== ms)
+            path_match(conn) = !(conn.pid in other_pids) &&
+                (try realpath(conn.project_path) catch; conn.project_path end) == norm_path
+            candidates = [c for c in conns if is_agent_spawned(c) && !(short_key(c) in claimed)]
+            match = something(
+                findfirst(c -> pid > 0 && c.pid == pid, candidates),
+                findfirst(path_match, candidates),
+                Some(nothing),
+            )
+            if match !== nothing
+                conn = candidates[match]
+                ms.status = :running
+                ms.session_key = short_key(conn)
+                _push_log!(
+                    :info,
+                    "Session '$(ms.name)' connected (session=$(ms.session_key))",
+                )
             end
 
             # Timeout: if starting for >120s, mark as crashed
@@ -504,11 +550,12 @@ function get_managed_sessions()
 end
 
 """
-    find_managed_session(project_path::String) -> Union{ManagedSession,Nothing}
+    find_managed_session(project_path::String; owner=nothing) -> Union{ManagedSession,Nothing}
 
-Find a managed session by project path (normalized).
+Find a managed session by project path (normalized). With `owner`, only a session with
+exactly that owner (`""` = shared) matches.
 """
-function find_managed_session(project_path::String)
+function find_managed_session(project_path::String; owner::Union{String,Nothing} = nothing)
     norm_path = try
         realpath(project_path)
     catch
@@ -518,6 +565,7 @@ function find_managed_session(project_path::String)
         copy(MANAGED_SESSIONS)
     end
     for ms in sessions
+        owner === nothing || ms.owner == owner || continue
         ms_norm = try
             realpath(ms.project_path)
         catch
@@ -526,4 +574,80 @@ function find_managed_session(project_path::String)
         ms_norm == norm_path && return ms
     end
     return nothing
+end
+
+"""Find the managed session connected as gate session `key`, or `nothing`."""
+function find_managed_by_key(key::AbstractString)
+    isempty(key) && return nothing
+    lock(MANAGED_SESSIONS_LOCK) do
+        for ms in MANAGED_SESSIONS
+            ms.session_key == key && return ms
+        end
+        return nothing
+    end
+end
+
+"""The MCP caller that owns gate session `key` privately, or `""` if it is shared (or not
+an agent-spawned session at all)."""
+function session_owner(key::AbstractString)
+    ms = find_managed_by_key(key)
+    return ms === nothing ? "" : ms.owner
+end
+
+"""True when gate session `key` is private to an agent other than `caller`."""
+private_to_other(key::AbstractString, caller::AbstractString) =
+    (o = session_owner(key); !isempty(o) && o != caller)
+
+"""
+    managed_session_for(conn) -> Union{ManagedSession,Nothing}
+
+The managed session behind gate connection `conn`: found by session key, or, for an agent-spawned
+session not yet linked to its key, by process id.
+"""
+function managed_session_for(conn::REPLConnection)
+    ms = find_managed_by_key(short_key(conn))
+    ms !== nothing && return ms
+    (is_agent_spawned(conn) && conn.pid > 0) || return nothing
+    lock(MANAGED_SESSIONS_LOCK) do
+        for m in MANAGED_SESSIONS
+            session_pid(m) == conn.pid && return m
+        end
+        return nothing
+    end
+end
+
+"""
+    shutdown_session!(mgr, conn; exit_wait=5.0) -> Symbol
+
+Shut down gate session `conn`. Asks its gate to exit and removes the connection and its files. If
+Kaimon spawned the process, it is then stopped: given `exit_wait` seconds to exit on its own after an
+acknowledged shutdown, then its terminal is closed, which hangs it up, reaps it, and kills it if it
+outlives the grace period. Its managed record is dropped. Returns `:acknowledged`, `:stalled` (it was
+stalled and did not answer) or `:unacknowledged`.
+"""
+function shutdown_session!(mgr::ConnectionManager, conn::REPLConnection; exit_wait::Real = 5.0)
+    was_stalled = conn.status == :stalled
+    ms = managed_session_for(conn)
+    ok = send_shutdown!(conn)
+    disconnect!(conn)
+    _unregister_session_tools!(conn)
+    lock(mgr.lock) do
+        idx = findfirst(c -> c === conn, mgr.connections)
+        idx !== nothing && deleteat!(mgr.connections, idx)
+    end
+    _remove_session_files(mgr.sock_dir, conn.session_id)
+    _fire_sessions_changed(mgr)
+    if ms !== nothing
+        if ok
+            deadline = time() + exit_wait
+            while (pty = ms.pty) !== nothing && Tachikoma.pty_alive(pty) && time() < deadline
+                sleep(0.1)
+            end
+        end
+        stop_session!(ms)
+        lock(MANAGED_SESSIONS_LOCK) do
+            filter!(m -> m !== ms, MANAGED_SESSIONS)
+        end
+    end
+    return ok ? :acknowledged : was_stalled ? :stalled : :unacknowledged
 end

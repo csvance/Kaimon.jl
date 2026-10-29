@@ -344,6 +344,41 @@ end
         @test K.install_julia_version("")[1] == false
     end
 
+    @testset "instantiate mode (#99)" begin
+        # Accepted spellings: the three modes, or a Bool.
+        @test K._parse_launch_config(Dict("instantiate" => "never")).instantiate == "never"
+        @test K._parse_launch_config(Dict("instantiate" => " Always ")).instantiate == "always"
+        @test K._parse_launch_config(Dict("instantiate" => true)).instantiate == "always"
+        @test K._parse_launch_config(Dict("instantiate" => false)).instantiate == "never"
+        @test (@test_logs (:warn,) K._parse_launch_config(Dict("instantiate" => "sometimes"))).instantiate == ""
+        @test K._parse_launch_config(Dict("threads" => "4")).instantiate == ""
+        @test K.LaunchConfig("", "", "", String[], "", "", false, "1.12").instantiate == ""
+
+        proj = mktempdir()
+        write(joinpath(proj, "kaimon.toml"), "[launch]\ninstantiate = false\n")
+        toml_lc = K.load_toml_launch_config(proj)
+        @test toml_lc.instantiate == "never"
+
+        # Round-trips through projects.json; a user's explicit "auto" overrides the repo's.
+        lc = K.LaunchConfig("", "", "", String[], "", "", false, "", "auto")
+        d = K._project_entry_to_dict(K.ProjectEntry("/p", true, lc))["launch_config"]
+        @test K._parse_launch_config(d).instantiate == "auto"
+        @test K.merge_launch_config(toml_lc, lc).instantiate == "auto"
+        @test K.merge_launch_config(toml_lc, K.LaunchConfig()).instantiate == "never"
+        @test occursin("instantiate never", K.launch_config_summary(toml_lc))
+
+        # The boot script: auto installs without precompiling, always precompiles, never skips.
+        script(mode) = K._build_session_script("/p"; instantiate = mode)
+        @test occursin("Pkg.instantiate(; allow_autoprecomp = false)", script("auto"))
+        @test occursin("Pkg.instantiate()", script("always"))
+        @test !occursin("Pkg.instantiate", script("never"))
+        for mode in ("auto", "always", "never")
+            @test Meta.parseall(script(mode)).args |> a -> !any(x -> x isa Expr && x.head in (:error, :incomplete), a)
+        end
+        # A failed instantiate is reported, not fatal to the session's boot.
+        @test occursin("catch e; @error \"Pkg.instantiate failed\"", script("auto"))
+    end
+
     @testset "an undeliverable prompt is not reported as a timeout" begin
         # A prompt that could not be delivered and a prompt the user ignored are different
         # facts. Collapsing them tells someone to approve a dialog that was never displayed,

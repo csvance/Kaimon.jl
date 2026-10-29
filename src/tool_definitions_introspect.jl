@@ -10,7 +10,7 @@ investigate_tool = @mcp_tool(
         "properties" => Dict(
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => [],
@@ -90,7 +90,7 @@ search_methods_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["query"],
@@ -139,7 +139,7 @@ macro_expand_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["expression"],
@@ -234,7 +234,7 @@ type_info_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["type_expr"],
@@ -270,7 +270,7 @@ profile_tool = @mcp_tool(
                 Dict("type" => "string", "description" => "Julia code to profile"),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["code"],
@@ -319,7 +319,7 @@ list_names_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["module_name"],
@@ -375,7 +375,7 @@ code_lowered_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["function_expr", "types"],
@@ -404,7 +404,7 @@ code_typed_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["function_expr", "types"],
@@ -440,7 +440,7 @@ format_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => ["path"],
@@ -521,7 +521,7 @@ lint_tool = @mcp_tool(
             ),
             "session" => Dict(
                 "type" => "string",
-                "description" => "Session key (8-char ID from resources/list). Required when multiple sessions are connected.",
+                "description" => "Session key (8-char ID from ping or start_session). Defaults to the session you're bound to (marked in ping), else the only connected session.",
             ),
         ),
         "required" => [],

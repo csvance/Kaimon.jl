@@ -50,8 +50,8 @@ end
 # ── Activate the test environment ─────────────────────────────────────────
 # Prefer the project's OWN test/ env (modern layout). Activating it directly IS
 # `julia --project=test`: [sources]/[compat]/deps are honored, and the resolved
-# test manifest + precompiled deps are reused across runs (fast). Fall back to a built temp
-# env (develop + add test-target deps) for legacy [extras]/[targets] suites with no
+# test manifest + precompiled deps are reused across runs (fast). Fall back to a built,
+# cached env (develop + add test-target deps) for legacy [extras]/[targets] suites with no
 # test/Project.toml.
 #
 # Returns the reason the environment is unusable, or "" when it is ready. Written as a
@@ -105,15 +105,52 @@ function setup_test_env(project_path)
         return ""
     end
 
-    # Legacy: no test/Project.toml. Build a temp env from [extras]/[targets] (no [sources]
-    # to honor there anyway, since sources need a Project.toml).
-    main_toml = TOML.parsefile(joinpath(project_path, "Project.toml"))
-    Pkg.activate(mktempdir())
-    println(_RUNNER_OUT, "TEST_RUNNER: ENV julia=$(VERSION) manifest=temp")
+    # Legacy: no test/Project.toml. Build an env from [extras]/[targets] (no [sources] to honor
+    # there anyway, since sources need a Project.toml). It is kept per project and Julia
+    # version under KAIMON_TEST_ENV_CACHE and stamped with a hash of the project's
+    # Project.toml, so repeat runs reuse its manifest and precompiled deps, and see the same
+    # versions, until that file changes.
+    main_toml_text = read(joinpath(project_path, "Project.toml"), String)
+    main_toml = TOML.parse(main_toml_text)
+    cache_root = get(ENV, "KAIMON_TEST_ENV_CACHE", "")
+    if isempty(cache_root)
+        Pkg.activate(mktempdir(); io = devnull)
+        println(_RUNNER_OUT, "TEST_RUNNER: ENV julia=$(VERSION) manifest=extras-temp")
+        flush(_RUNNER_OUT)
+        return build_extras_env(project_path, main_toml)
+    end
+    env_dir = joinpath(cache_root, string(basename(project_path), "-",
+        string(hash(realpath(project_path)); base = 62), "-v", VERSION.major, ".", VERSION.minor))
+    stamp_path = joinpath(env_dir, "kaimon-stamp")
+    stamp = string(hash(main_toml_text); base = 62)
+    reuse = isfile(joinpath(env_dir, "Project.toml")) && isfile(stamp_path) &&
+            read(stamp_path, String) == stamp
+    reuse || (rm(env_dir; recursive = true, force = true); mkpath(env_dir))
+    Pkg.activate(env_dir; io = devnull)
+    println(_RUNNER_OUT, "TEST_RUNNER: ENV julia=$(VERSION) manifest=$(reuse ? "extras-reused" : "extras-built")")
     flush(_RUNNER_OUT)
+    if reuse
+        try
+            Pkg.instantiate(; io = devnull)
+        catch e
+            return string("instantiate failed:\n", sprint(showerror, e))
+        end
+        return ""
+    end
+    err = build_extras_env(project_path, main_toml)
+    # Only a clean build is reused; one that hit an error is rebuilt next time.
+    isempty(err) && !_EXTRAS_BUILD_WARNED[] && write(stamp_path, stamp)
+    return err
+end
+
+const _EXTRAS_BUILD_WARNED = Ref(false)
+
+# Develop the package-under-test into the active env and add its [targets] test deps.
+function build_extras_env(project_path, main_toml)
     try
         Pkg.develop(Pkg.PackageSpec(path = project_path); io = devnull)
     catch e
+        _EXTRAS_BUILD_WARNED[] = true
         println(_RUNNER_OUT, "TEST_RUNNER: WARN develop failed: $(first(sprint(showerror, e), 120))")
     end
     test_deps = Dict{String,Any}()
@@ -130,6 +167,7 @@ function setup_test_env(project_path)
                 Pkg.add(name; io = devnull)
             end
         catch e
+            _EXTRAS_BUILD_WARNED[] = true
             println(_RUNNER_OUT, "TEST_RUNNER: WARN could not add $name: $(first(sprint(showerror, e), 120))")
         end
     end

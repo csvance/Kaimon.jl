@@ -445,25 +445,20 @@ function _shutdown_selected_session!(m::KaimonModel)
         _close_session_terminal!(m)
     end
 
-    # Fire-and-forget: shutdown gate + stop managed process without blocking the TUI
-    Threads.@spawn begin
-        send_shutdown!(conn)
-        if is_agent_spawned(conn)
-            ms = find_managed_session(conn.project_path)
-            ms !== nothing && stop_session!(ms)
-        end
-    end
-
-    # Immediately remove from connection manager
     if mgr !== nothing
+        # Take it off the list (and its files, so discovery does not re-add it) at once; the
+        # shutdown itself can wait on a stalled gate, so it runs in the background.
         lock(mgr.lock) do
-            _unregister_session_tools!(conn)
-            disconnect!(conn)
-            _remove_session_files(mgr.sock_dir, conn.session_id)
             idx = findfirst(c -> c === conn, mgr.connections)
             idx !== nothing && deleteat!(mgr.connections, idx)
         end
+        _remove_session_files(mgr.sock_dir, conn.session_id)
         _fire_sessions_changed(mgr)
+        Threads.@spawn try
+            shutdown_session!(mgr, conn)
+        catch e
+            _push_log!(:warn, "Shutting down session '$dname' failed: $(sprint(showerror, e))")
+        end
     end
 
     # Fix selection bounds

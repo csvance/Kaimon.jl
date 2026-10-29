@@ -182,17 +182,22 @@ function _rpc_session_info(request, session)
     end
 end
 
-function _rpc_tools_list(request, tools)
+function _rpc_tools_list(request, tools, session = nothing)
     # Internal worker tools (relayed to by intermediary sessions) are hidden by
     # default; a client can pass params.include_hidden=true to see them.
     include_hidden = get(get(request, "params", Dict()), "include_hidden", false) === true
+    # An agent opened with `only` is shown just the tools it was given, as it may call no others.
+    only = _only_tools_for_session(session)
+    allowed = _allowed_tools(session === nothing ? "" : session.id)
     tool_list = [
         Dict(
             "name" => tool.name,
             "title" => tool.title,
             "description" => tool.description,
             "inputSchema" => tool.parameters,
-        ) for tool in values(tools) if include_hidden || !tool.hidden
+        ) for tool in values(tools) if (include_hidden || !tool.hidden) &&
+                                         (only === nothing || _only_allows(only, tool.name)) &&
+                                         (allowed === nothing || _allowed_by(allowed, tool.name))
     ]
 
     response = Dict(
@@ -404,6 +409,14 @@ function _tool_refusal_response(request, tool_name::AbstractString, why::Abstrac
                                  "result" => result)))
 end
 
+"The tool list of the `only` agent owning this MCP session, or `nothing` when it has none."
+function _only_tools_for_session(session)
+    aid = _session_agent_id(session === nothing ? "" : session.id)
+    isempty(aid) && return nothing
+    s = lock(AGENT_SESSIONS_LOCK) do; get(AGENT_SESSIONS, aid, nothing); end
+    return s !== nothing && s.backend isa ClaudeBackend && s.backend.only ? s.backend.allowed_tools : nothing
+end
+
 """
 Why this MCP session's agent may not make this call, or `nothing`.
 
@@ -413,8 +426,13 @@ inspection: `args` was once left off the streaming side, which quietly exempted 
 eliciting and extension tool from the workspace boundary while the name check still ran. So the
 question is asked in one place and `args` is not optional here.
 """
-_refuse_tool_for_session(session, tool_name::AbstractString, args) =
-    agent_tool_refusal(_session_agent_id(session === nothing ? "" : session.id), tool_name, args)
+function _refuse_tool_for_session(session, tool_name::AbstractString, args)
+    # The tools the service in front allows this caller come first: no agent's own allowance
+    # widens them (see `_allowed_tools`).
+    allowed = _allowed_tools(session === nothing ? "" : session.id)
+    allowed === nothing || _allowed_by(allowed, tool_name) || return "$tool_name is not among the tools this caller may use"
+    return agent_tool_refusal(_session_agent_id(session === nothing ? "" : session.id), tool_name, args)
+end
 
 function _rpc_tools_call(request, tools, name_to_id, session = nothing)
                 params = get(request, "params", nothing)

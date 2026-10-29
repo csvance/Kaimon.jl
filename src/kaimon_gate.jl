@@ -313,6 +313,41 @@ _session_agent_id(sid::AbstractString) =
         get(_SESSION_AGENT_ID, String(sid), "")
     end
 
+# ── Tools allowed per request ────────────────────────────────────────────────────────────────────
+# A service that puts Kaimon behind it (offering a few of its tools to its own users, say) names,
+# on each request, the tools that request's caller may use: `X-Kaimon-Allowed-Tools`,
+# comma-separated, in the dotted (`notes.search`) or underscore spelling. The list belongs to the
+# request, not its session, so each tool call is judged by its own request's header whatever else
+# shares the session. The service in front must strip any copy a client sends. With
+# `KAIMON_RESTRICTED=1`, a request with no list, from a session no agent owns, may use nothing.
+
+"Parse an `X-Kaimon-Allowed-Tools` header value (`nothing`: the request sent none)."
+_parse_allowed_tools(h) =
+    h === nothing ? nothing : String[strip(t) for t in split(h, ',') if !isempty(strip(t))]
+
+"""
+Record the list of the request being handled, for this task. Set on every request, with `nothing`
+when it named none: a keep-alive connection serves its requests one after another on one task.
+"""
+_set_request_allowed!(list::Union{Nothing,Vector{String}}) = task_local_storage(:mcp_allowed_tools, list)
+
+"Whether this Kaimon serves only the tools each request names (see `_allowed_tools`)."
+_restricted() = get(ENV, "KAIMON_RESTRICTED", "") == "1"
+
+"""
+The tools the request being handled may use, or `nothing` for no limit beyond the server's own. A
+restricted Kaimon gives a request with no list, from a session (`sid`) no agent owns, an empty one.
+"""
+function _allowed_tools(sid::AbstractString)
+    list = get(task_local_storage(), :mcp_allowed_tools, nothing)
+    list === nothing && _restricted() && isempty(_session_agent_id(sid)) && return String[]
+    return list
+end
+
+"Whether `list` names `tool`, in either spelling."
+_allowed_by(list::AbstractVector{<:AbstractString}, tool::AbstractString) =
+    (t = replace(String(tool), '.' => '_'); any(e -> replace(e, '.' => '_') == t, list))
+
 """The Kaimon agent_id for the in-flight tool dispatch, or "" for external/self calls."""
 _current_mcp_agent_id() = string(get(task_local_storage(), :mcp_agent_id, ""))
 
@@ -338,6 +373,18 @@ function _bind_caller_session!(gate_key::AbstractString)
         end
     end
     return nothing
+end
+
+"""The connected session `caller` is bound to, or `nothing` (no caller, no binding, or the
+bound session is gone)."""
+function _caller_bound_conn(mgr, caller::AbstractString)
+    isempty(caller) && return nothing
+    key = lock(STANDALONE_SESSIONS_LOCK) do
+        s = get(STANDALONE_SESSIONS, String(caller), nothing)
+        s === nothing ? "" : something(s.target_julia_session_id, "")
+    end
+    isempty(key) && return nothing
+    return get_connection_by_key(mgr, key)
 end
 
 """Project path for the calling agent's default session. Resolution order:
@@ -390,18 +437,24 @@ function _root_uri_to_path(uri)
 end
 
 """Match a captured workspace root to a connected gate and bind the caller to it
-(longest project_path that is `root` or an ancestor of it wins)."""
+(longest project_path that is `root` or an ancestor of it wins; among equals, the caller's
+own private session). Sessions another agent started privately are never picked."""
 function _bind_caller_to_project!(caller::AbstractString, project_path::AbstractString)
     mgr = GATE_CONN_MGR[]
     mgr === nothing && return
     proj = rstrip(String(project_path), '/')
     best = nothing
+    best_rank = (0, false)
     for c in connected_sessions(mgr)
         isempty(c.project_path) && continue
+        key = short_key(c)
+        private_to_other(key, caller) && continue
         cp = rstrip(c.project_path, '/')
         if cp == proj || startswith(proj, cp * "/")
-            (best === nothing || length(rstrip(best.project_path, '/')) < length(cp)) &&
-                (best = c)
+            rank = (length(cp), session_owner(key) == caller)
+            if best === nothing || rank > best_rank
+                best, best_rank = c, rank
+            end
         end
     end
     best === nothing && return
@@ -486,11 +539,16 @@ function _resolve_gate_conn(session::String; allow_stalled::Bool = false)
     end
 
     conn = if isempty(session)
-        conns = connected_sessions(mgr)
-        if length(conns) == 1
-            conns[1]
+        # No `ses`: the caller's bound session (set by its `ses=`, its start_session, or
+        # its workspace root), else the only connected session — but never a session
+        # another agent started privately.
+        caller = _current_mcp_caller()
+        bound = _caller_bound_conn(mgr, caller)
+        if bound !== nothing
+            bound
         else
-            nothing
+            conns = [c for c in connected_sessions(mgr) if !private_to_other(short_key(c), caller)]
+            length(conns) == 1 ? conns[1] : nothing
         end
     else
         get_connection_by_key(mgr, session)
@@ -580,19 +638,12 @@ end
 """
     _prepare_gate_code(code, quiet) -> (cleaned_code, show_return_value, was_stripped)
 
-Apply println stripping and quiet-mode semicolons to code before sending to gate.
+Apply print stripping (see print_strip.jl) and quiet-mode semicolons to code before
+sending it to the gate.
 """
 function _prepare_gate_code(code::String, quiet::Bool)
-    was_stripped = Ref(false)
-    expr = Base.parse_input_line(code)
-    expr = remove_println_calls(expr, true, quiet, was_stripped)
-    cleaned_code = if expr === nothing
-        ""
-    elseif was_stripped[]
-        _serialize_expr(expr)
-    else
-        code
-    end
+    cleaned_code, stripped = strip_agent_output(code; quiet = quiet)
+    was_stripped = Ref(stripped)
 
     show_return_value = !quiet && !REPL.ends_with_semicolon(code)
     if quiet && !REPL.ends_with_semicolon(cleaned_code)
@@ -688,7 +739,7 @@ function _format_gate_response(
     end
 
     if was_stripped[]
-        result *= "\n\n⚠️  Note: println/print/logging calls were removed. Use q=false with a final expression to see values."
+        result *= "\n\n" * print_strip_note()
     end
 
     if length(result) > max_output

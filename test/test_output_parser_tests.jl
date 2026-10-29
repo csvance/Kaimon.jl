@@ -393,10 +393,11 @@ using Kaimon:
         @test occursin("Julia: 1.12.7", summary)
         @test occursin("Manifest: Manifest-v1.12.toml", summary)
 
-        # The legacy [extras]/[targets] path builds a throwaway env and says so.
+        # The legacy [extras]/[targets] path says how it got its env, in words.
         run2 = TestRun(; id = 121, project_path = "/tmp/p")
-        parse_test_line!(run2, "TEST_RUNNER: ENV julia=1.13.0 manifest=temp")
-        @test run2.manifest_name == "temp"
+        parse_test_line!(run2, "TEST_RUNNER: ENV julia=1.13.0 manifest=extras-reused")
+        @test run2.manifest_name == "extras-reused"
+        @test occursin("Manifest: env from [extras]/[targets], reused", format_test_summary(run2))
 
         delete!(_PARSER_STATES, 120)
         delete!(_PARSER_STATES, 121)

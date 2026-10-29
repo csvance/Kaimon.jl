@@ -50,7 +50,8 @@ using Kaimon
         dir = mktempdir()
         src = joinpath(dir, "src")
         mkpath(src)
-        # Synthetic .cov: '-' = non-executable, a number = coverable (covered if >0).
+        write(joinpath(src, "Foo.jl"), "module Foo\nfoo() = 1\nbar() = 2\nend\n")
+        # Synthetic .cov: '-' = no count, a number = coverable (covered if >0).
         write(joinpath(src, "Foo.jl.12345.cov"), """
                 - module Foo
                 5 foo() = 1
@@ -65,6 +66,44 @@ using Kaimon
 
         # No .cov data → clear message, no crash.
         @test occursin("no .cov data", Kaimon._collect_coverage(mktempdir()))
+    end
+
+    @testset "_collect_coverage counts uncalled functions and unloaded files as not covered" begin
+        dir = mktempdir()
+        src = joinpath(dir, "src")
+        test = joinpath(dir, "test")
+        mkpath(src); mkpath(test)
+        # `g` was never called, so Julia never compiled it and wrote no counts for it.
+        write(joinpath(src, "A.jl"), """
+            module A
+            f(x) = x + 1
+            function g(x)
+                y = x * 2
+                return y
+            end
+            end
+            """)
+        write(joinpath(src, "A.jl.111.cov"), """
+                    - module A
+                    3 f(x) = x + 1
+                    - function g(x)
+                    -     y = x * 2
+                    -     return y
+                    - end
+                    - end
+            """)
+        # No test loaded B.jl, so it has no .cov at all.
+        write(joinpath(src, "B.jl"), "h(x) = x - 1\n")
+        write(joinpath(test, "runtests.jl.111.cov"), "        1 using A\n")
+
+        summary = Kaimon._collect_coverage(dir)
+        m = match(r"Coverage: (\d+)/(\d+) lines", summary)
+        covered, coverable = parse(Int, m[1]), parse(Int, m[2])
+        @test covered == 1
+        @test coverable >= 4          # f, g's body, and B.jl's h are all coverable
+        @test occursin("src/B.jl: 0/", summary)
+        # Every .cov file in the project is removed, test/ included.
+        @test isempty(filter(f -> endswith(f, ".cov"), vcat(readdir(src), readdir(test))))
     end
 
     @testset "_launch_julia_exe resolves the binary sessions and test runs share" begin
@@ -144,6 +183,41 @@ using Kaimon
             @test run2.status == Kaimon.RUN_PASSED
             @test isfile(joinpath(dir, "test", vname))
             @test read(other, String) == before
+        end
+    end
+
+    @testset "an [extras]/[targets] env is built once and reused until Project.toml changes" begin
+        if ci
+            @test_skip "cached extras env (spawns a sub-subprocess; skipped in CI)"
+        else
+            dir = mktempdir()
+            mkpath(joinpath(dir, "src"))
+            mkpath(joinpath(dir, "test"))
+            write(joinpath(dir, "src", "Legacy.jl"), "module Legacy end\n")
+            project = """
+            name = "Legacy"
+            uuid = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+            version = "0.1.0"
+
+            [extras]
+            Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+            [targets]
+            test = ["Test"]
+            """
+            write(joinpath(dir, "Project.toml"), project)
+            write(joinpath(dir, "test", "runtests.jl"),
+                  "using Test, Legacy\n@testset \"legacy\" begin\n    @test true\nend\n")
+            withenv("KAIMON_TEST_ENV_CACHE" => mktempdir()) do
+                first_run = _run_to_completion(dir)
+                @test first_run.status == Kaimon.RUN_PASSED
+                @test first_run.manifest_name == "extras-built"
+                second = _run_to_completion(dir)
+                @test second.status == Kaimon.RUN_PASSED
+                @test second.manifest_name == "extras-reused"
+                write(joinpath(dir, "Project.toml"), project * "\n[compat]\njulia = \"1.10\"\n")
+                @test _run_to_completion(dir).manifest_name == "extras-built"
+            end
         end
     end
 

@@ -8,14 +8,14 @@ score below 75, review `usage_instructions` and retake.
 ## Q1: Shared REPL & surfacing values (12)
 
 a) You and the user drive ONE live Julia REPL — your `ex()` code and its output appear in
-   their session immediately, as if they typed it. **Consequence:** `println`/`print` to
-   stdout is **STRIPPED** from what you get back (and the user already saw the run), so never
+   their session immediately, as if they typed it. **Consequence:** with the default `q=true`,
+   `println`/`print` calls are **removed** from your cell (and the user already saw the run), so never
    use `println` to communicate or to surface a value. Narrate in TEXT responses, and return a
    final expression with `q=false` when you need to see something. (5)
 b) `using Statistics` → `q=true` (import, no value needed) · `data = [1,2,3]` → `q=true`
    (assignment) · `length(result)` → `q=false` (you need the value to judge the bug).
    **Key:** `q=false` only when the return value changes what you do next. (3)
-c) Three faults: **(i)** every `println` is stripped, so none of that narration reaches you —
+c) Three faults: **(i)** the `println` calls are removed, so none of that narration reaches you —
    put it in TEXT instead; **(ii)** `q=false` on imports and assignments wastes tokens
    returning values you don't need; **(iii)** no batching — three round trips for one
    sequence. Fix: one call,

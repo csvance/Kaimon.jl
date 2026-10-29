@@ -338,9 +338,10 @@ function _exec_restart(name::String, session_id::String, project_path::String,
     ptrs = Ptr{UInt8}[pointer(s) for s in argv]
     push!(ptrs, Ptr{UInt8}(0))  # NULL terminator
     GC.@preserve argv ccall(:execvp, Cint, (Cstring, Ptr{Ptr{UInt8}}), argv[1], ptrs)
+    err = Base.Libc.errno()           # read at once: the logger below can overwrite it
 
     # If we reach here, execvp failed — fall back to exit
-    @error "execvp failed, falling back to exit" errno = Base.Libc.errno()
+    @error "execvp failed, falling back to exit" errno = err
     exit(1)
 end
 

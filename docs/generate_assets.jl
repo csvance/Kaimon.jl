@@ -503,37 +503,6 @@ const EVENTS_STARTUP_GLOBAL = EventScript(
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-# Demo: kaimon_startup_project — Config tab → onboarding path input → confirm
-# ═══════════════════════════════════════════════════════════════════════
-
-function _build_startup_project_model()
-    _model(
-        _render_mode = true,
-        tab = 6,
-        server_running = true,
-        server_started = true,
-        server_port = 2828,
-        client_statuses = [
-            "Claude Code" => false,
-            "VS Code / Copilot" => false,
-        ],
-        focused_pane = Dict(1 => 2, 2 => 1, 3 => 1, 4 => 1, 5 => 1, 6 => 2, 7 => 2),
-    )
-end
-
-const EVENTS_STARTUP_PROJECT = EventScript(
-    pause(1.0),
-    (0.0, key('o')),                        # open onboarding path input
-    pause(1.8),                             # show the pre-filled path
-    (0.0, key(:enter)),                     # accept path → confirm modal
-    pause(2.0),                             # linger on confirm
-    (0.0, key(:right)),                     # move to Cancel (no real write)
-    pause(0.5),
-    (0.0, key(:enter)),                     # cancel
-    pause(0.8),
-)
-
-# ═══════════════════════════════════════════════════════════════════════
 # Demo: kaimon_search — Search tab with indexed collection and results
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1162,7 +1131,6 @@ const DEMOS = [
     DemoSpec("kaimon_tests",               _build_tests_model,              EVENTS_TESTS,               130, 34, 140, 15),
     DemoSpec("kaimon_config",              _build_config_model,             EVENTS_CONFIG,              130, 34, 150, 15),
     DemoSpec("kaimon_startup_global",      _build_startup_global_model,     EVENTS_STARTUP_GLOBAL,      130, 34,  80, 15),
-    DemoSpec("kaimon_startup_project",     _build_startup_project_model,    EVENTS_STARTUP_PROJECT,     130, 34, 115, 15),
     DemoSpec("kaimon_search",              _build_search_model,             EVENTS_SEARCH,              130, 34, 160, 15),
     DemoSpec("kaimon_search_config",       _build_search_config_model,      EVENTS_SEARCH_CONFIG,       130, 34,  75, 15),
     DemoSpec("kaimon_collection_manager",  _build_collection_manager_model, EVENTS_COLLECTION_MANAGER,  130, 34,  90, 15),
